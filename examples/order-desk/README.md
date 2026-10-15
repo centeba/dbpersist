@@ -9,6 +9,7 @@ A small trading-desk back office that shows every part of the SDK in a realistic
 | Dashboard service | `orderdesk/dashboard.py` | the **webhook receiver** mounted in FastAPI, `active_select` (current rows plus future changes), a second filter subscription, a **key subscription** for VIP customers, version-based reconciliation in callbacks, heartbeats, a **server-sent events** stream of every notification, action endpoints, and a proxy to the pub/sub admin API |
 | React UI | `ui/` | a live view of the pub/sub flow: open orders kept current by webhooks, a real-time notification feed, your subscriptions, every pub/sub client with pending and failed delivery counts, platform-wide counters, and buttons to seed, fill and cancel orders so you can watch the round trip |
 | Demo | `demo.py` | runs the dashboard in-process, drives the CLI, and asserts the notifications arrive |
+| Inbound publisher | `inbound/`, `orderdesk/inbound.py` | an external publisher's event feed brought into the desk through an **inbound source**: signature scheme, envelope mapping and pull as configuration, with register / test / simulate / status commands |
 
 ## Run it
 
@@ -65,6 +66,41 @@ What you are looking at:
 The browser never holds the dbpersist API key; the dashboard proxies the admin calls.
 
 The JSON endpoints behind the UI are `GET /api/state`, `GET /api/events` (SSE), `GET /api/orders/{id}`, `GET /api/pubsub/{stats,clients,subscriptions}` and `POST /api/actions/{seed,fill,cancel}`.
+
+
+## Bringing in an external publisher's events
+
+The desk also consumes event notifications from an outside system (a clearing firm in this
+example). Everything publisher-specific is **configuration inside this application**, never in
+the dbpersist packages:
+
+| File | What it is |
+|---|---|
+| `inbound/clearing-firm.json` | the inbound-source definition: the publisher's signature scheme, the mapping from its envelope (`events[]`, `id`, `type`, `time`, `data.*`) onto the desk's `Customer` and `Order` types, and an optional pull of its feed. Secrets and URLs are `${ENV_VAR}` placeholders. |
+| `inbound/sample-events.json` | a sample batch in the publisher's format, used for dry runs and simulation |
+| `orderdesk/inbound.py` | `register`, `test`, `simulate`, `status`, `remove` commands around that file |
+
+```bash
+export CLEARING_WEBHOOK_SECRET=demo-secret            # the secret the publisher signs with
+uv run python -m orderdesk.inbound register inbound/clearing-firm.json
+uv run python -m orderdesk.inbound test     inbound/clearing-firm.json inbound/sample-events.json
+uv run python -m orderdesk.inbound simulate inbound/clearing-firm.json inbound/sample-events.json
+uv run python -m orderdesk.inbound status   inbound/clearing-firm.json
+```
+
+`register` creates (or replaces) the source and prints the URL to give the publisher,
+`http://<host>:8101/v1/inbound/clearing-firm`. `test` shows, without storing anything, which
+sample events map to which type, key and operation, which are rejected and why, and whether the
+sample signature verifies. `simulate` plays the publisher: it signs the sample exactly as the
+configuration says and POSTs it to the ingress, which answers `202` with a message id; the
+persistence service's queue processor then applies it, and the desk's dashboard shows the
+resulting `Customer` changes as ordinary notifications (the restricted VIP account arrives through
+the key subscription). `status` shows the queue, counters and the last messages.
+
+The file is a **template**: before pointing a real publisher at it, replace the envelope field
+names, event type names and signature details with the ones from that publisher's documentation,
+run `test` with a real sample, and only then `register`. Unknown event types are reported as
+rejected rather than guessed, so a mapping gap is visible immediately in `status`.
 
 ## How the pieces connect
 

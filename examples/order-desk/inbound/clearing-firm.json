@@ -1,0 +1,62 @@
+{
+  "_comment": [
+    "Inbound source for a clearing firm's event-notification feed, as the order desk consumes it.",
+    "This is a TEMPLATE: the envelope field names (events, id, type, time, data.*), the event type",
+    "names and the signature scheme must be taken from the publisher's own documentation and",
+    "checked with  python -m orderdesk.inbound test clearing-firm.json <sample.json>  before use.",
+    "Vendor specifics live here, in the consuming application, never in the dbpersist packages."
+  ],
+  "name": "clearing-firm",
+  "description": "Account and order events pushed by the clearing firm",
+  "mode": "upsert",
+  "update_mode": "merge",
+  "auto_register_types": false,
+  "processing": "queue",
+  "auth": {
+    "mode": "hmac_sha256",
+    "secret": "${CLEARING_WEBHOOK_SECRET}",
+    "header": "X-Signature",
+    "signature_prefix": "sha256=",
+    "timestamp_header": "X-Timestamp",
+    "signed_payload": "{timestamp}.{body}",
+    "encoding": "hex",
+    "tolerance_seconds": 300
+  },
+  "mapping": {
+    "events_path": "events",
+    "type": "type",
+    "type_map": {
+      "account.created": "Customer",
+      "account.updated": "Customer",
+      "account.restricted": "Customer",
+      "account.closed": "Customer",
+      "order.accepted": "Order",
+      "order.filled": "Order",
+      "order.cancelled": "Order"
+    },
+    "key": {
+      "customer_id": "data.accountNumber"
+    },
+    "op": "type",
+    "op_map": {
+      "account.created": "insert",
+      "account.closed": "delete",
+      "order.accepted": "insert",
+      "order.cancelled": "update"
+    },
+    "default_op": "update",
+    "data": "data",
+    "external_id": "id",
+    "occurred_at": "time",
+    "envelope_field": "_envelope"
+  },
+  "pull": {
+    "enabled": false,
+    "url": "${CLEARING_EVENTS_URL}",
+    "headers": {"Authorization": "Bearer ${CLEARING_API_TOKEN}"},
+    "interval_seconds": 60,
+    "cursor_param": "after",
+    "cursor_path": "next_cursor",
+    "timeout_seconds": 20
+  }
+}

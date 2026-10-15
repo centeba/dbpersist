@@ -416,3 +416,16 @@ another. The secret is stored with the source and masked in every response.
 Field names above are illustrative. For a specific publisher, take the envelope, signature
 scheme and feed endpoint from its documentation and check the mapping with the dry-run endpoint
 before enabling the source.
+
+### Where publisher-specific configuration lives
+
+dbpersist stays vendor-neutral: the packages know authentication schemes, an expression
+language and a mapping model, nothing about any particular publisher. A publisher profile is a
+JSON document owned by the consuming application, kept next to its own code and secrets, and
+applied with the management API or the SDK's `create_inbound_source`. The order-desk example
+shows the pattern end to end: `examples/order-desk/inbound/clearing-firm.json` is the profile
+(with `${ENV_VAR}` placeholders for the secret and feed URL), `inbound/sample-events.json` is a
+sample batch, and `orderdesk/inbound.py` provides `register`, `test`, `simulate`, `status` and
+`remove`. Adopting a new publisher means writing such a file, dry-running a real sample with
+`POST /inbound-sources/{name}/test` until every event maps or is deliberately rejected, and
+registering it. Nothing in dbpersist changes.

@@ -65,7 +65,7 @@ flowchart LR
     P & S & W -- "OTLP" --> O
 ```
 
-Clients talk to dbpersist over HTTP with a static API key. dbpersist talks back to clients only through webhooks. Everything emits logs, traces and metrics over OTLP to an external observability platform; dbpersist contains no telemetry storage of its own.
+Clients talk to dbpersist over HTTP with a static API key. dbpersist talks back to clients only through webhooks. External publishers reach dbpersist through **inbound sources**: per-sender configuration (authentication scheme, envelope mapping, optional feed pull) that turns their notifications into ordinary objects and events; the configuration belongs to the consuming application, not to dbpersist. Everything emits logs, traces and metrics over OTLP to an external observability platform; dbpersist contains no telemetry storage of its own.
 
 ## 3. Components
 
@@ -396,6 +396,7 @@ A load probe run inside the Docker network on a developer laptop, with one worke
 | HMAC-signed webhooks | mTLS; bearer tokens in the URL | Works with any receiver, no certificate management, replay-bounded by timestamp. |
 | Shared static API key | OAuth2 / JWT | Service-to-service deployment behind a gateway; keeps the surface small. Swappable in one dependency. |
 | Inbound queue in Postgres, processed by the API process | Celery task per inbound message; process synchronously | The sender is acknowledged once the row is committed, independent of processing; per-source ordering comes from one row lock; no new runtime component. A dedicated processor instance is a flag away (`INBOUND_PROCESSOR_ENABLED`). |
+| Publisher profiles are configuration owned by the consumer | Per-publisher adapters inside dbpersist | Keeps the service vendor-neutral and testable in isolation; a new publisher is a JSON profile (auth scheme, envelope mapping, feed URL) validated with the dry-run endpoint, as the order-desk example's `inbound/clearing-firm.json` shows. |
 | Pull as an optional complement to push | Push only | Publishers stop pushing, miss deliveries or offer backfill feeds; pulling the same feed into the same queue with the same dedupe covers all three. |
 | Sync SQLAlchemy in workers, async in APIs | Async everywhere | Celery prefork and asyncio do not mix; the two engines share the ORM models. |
 | JSON filter DSL instead of a text grammar | SQL fragments; a custom parser | Validated by Pydantic, safe to store and execute, trivially translatable to SQL and to in-memory checks. |

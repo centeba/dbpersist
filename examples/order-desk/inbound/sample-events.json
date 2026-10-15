@@ -1,0 +1,28 @@
+{
+  "events": [
+    {
+      "id": "evt-0001",
+      "type": "account.created",
+      "time": "2026-03-01T10:00:00Z",
+      "data": {"accountNumber": "C400", "name": "Delta Partners", "tier": "standard", "status": "active"}
+    },
+    {
+      "id": "evt-0002",
+      "type": "account.updated",
+      "time": "2026-03-01T10:05:00Z",
+      "data": {"accountNumber": "C400", "tier": "vip"}
+    },
+    {
+      "id": "evt-0003",
+      "type": "account.restricted",
+      "time": "2026-03-01T10:06:00Z",
+      "data": {"accountNumber": "C100", "status": "restricted", "reason": "margin call"}
+    },
+    {
+      "id": "evt-0004",
+      "type": "position.updated",
+      "time": "2026-03-01T10:07:00Z",
+      "data": {"accountNumber": "C100", "symbol": "ACME", "qty": 1000}
+    }
+  ]
+}
