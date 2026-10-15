@@ -12,6 +12,12 @@ celery_app = Celery("dbpersist_pubsub", broker=settings.redis_url)
 celery_app.conf.update(
     task_ignore_result=True,
     task_acks_late=True,
+    # A task that runs for minutes is stuck (observed: a prefork child blocked forever in
+    # getaddrinfo while opening a DB connection). Kill it and requeue the message rather than
+    # holding it unacked for the broker's visibility timeout.
+    task_time_limit=120,
+    task_acks_on_failure_or_timeout=False,
+    task_reject_on_worker_lost=True,
     worker_prefetch_multiplier=4,
     task_serializer="json",
     accept_content=["json"],

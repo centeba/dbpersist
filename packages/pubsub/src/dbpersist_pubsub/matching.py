@@ -11,8 +11,25 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from dbpersist_common.events import ObjectEvent
-from dbpersist_common.filters import matches, parse_filter
+from dbpersist_common.filters import And, Clause, Or, matches, parse_filter
 from dbpersist_pubsub.models import Subscription
+
+# Parsed filter per subscription id. Parsing costs ~20 us (pydantic validation) while
+# evaluating costs ~1 us, so without this cache matching is dominated by re-parsing the same
+# filters for every event. Subscriptions are immutable (create/delete only), so the id is a
+# sufficient key; the dict is cleared when it grows past _PARSED_MAX to bound stale entries.
+_parsed: dict[uuid.UUID, Clause | And | Or] = {}
+_PARSED_MAX = 10_000
+
+
+def parsed_filter(sub: Subscription) -> Clause | And | Or:
+    hit = _parsed.get(sub.id)
+    if hit is not None:
+        return hit
+    if len(_parsed) >= _PARSED_MAX:
+        _parsed.clear()
+    parsed = _parsed[sub.id] = parse_filter(sub.filter)
+    return parsed
 
 
 def subscription_matches(sub: Subscription, event: ObjectEvent) -> bool:
@@ -28,7 +45,7 @@ def subscription_matches(sub: Subscription, event: ObjectEvent) -> bool:
     if event.object_id is not None:
         data["id"] = str(event.object_id)
     try:
-        return matches(parse_filter(sub.filter), data)
+        return matches(parsed_filter(sub), data)
     except ValueError:
         return False
 

@@ -59,7 +59,10 @@ services:
 
   pubsub-worker:
     build: .
-    command: celery -A dbpersist_pubsub.celery_app worker -Q events,deliveries -c 8 --loglevel=info
+    # Prefork with one child per core: per-task Python CPU, not webhook latency, bounds this
+    # worker, so processes beat threads (GIL). Size with PUBSUB_WORKER_CONCURRENCY; see
+    # docs/DEVELOPER_GUIDE.md "Performance".
+    command: celery -A dbpersist_pubsub.celery_app worker -Q events,deliveries -P prefork -c ${PUBSUB_WORKER_CONCURRENCY:-16} --loglevel=info
     environment: *app_env
     depends_on:
       pubsub-api: { condition: service_started }

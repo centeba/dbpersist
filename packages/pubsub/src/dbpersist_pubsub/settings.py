@@ -9,3 +9,4 @@ class Settings(CommonSettings):
     webhook_timeout_seconds: float = 10.0
     webhook_max_retries: int = 8
     webhook_backoff_max_seconds: int = 600
+    deliver_inline: bool = True  # first attempt inside publish_event when one subscriber matches

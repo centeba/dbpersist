@@ -4,15 +4,17 @@ import json
 import logging
 import random
 import time
-from datetime import UTC, datetime
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 
 import httpx
 from celery import Task
+from sqlalchemy import bindparam, select, text
 
 from dbpersist_common.signing import EVENT_ID_HEADER, SIGNATURE_HEADER, TIMESTAMP_HEADER, sign
 from dbpersist_common.telemetry import get_meter
 from dbpersist_pubsub.celery_app import celery_app, settings
-from dbpersist_pubsub.db import sync_sessionmaker
+from dbpersist_pubsub.db import autocommit_sessionmaker, sync_sessionmaker
 from dbpersist_pubsub.models import Delivery, Subscriber
 from dbpersist_pubsub.stats import get_stats
 
@@ -29,7 +31,29 @@ _duration = _meter.create_histogram(
 
 def make_client() -> httpx.Client:
     """Factory for the HTTP client; tests replace it with a MockTransport-backed client."""
-    return httpx.Client(timeout=settings.webhook_timeout_seconds)
+    return httpx.Client(
+        timeout=settings.webhook_timeout_seconds,
+        limits=httpx.Limits(max_connections=64, max_keepalive_connections=32),
+    )
+
+
+_shared_client: httpx.Client | None = None
+_shared_factory: Callable[[], httpx.Client] | None = None
+
+
+def shared_client() -> httpx.Client:
+    """One keep-alive client per worker process, shared by all threads.
+
+    Rebuilt whenever `make_client` is replaced (tests swap in a MockTransport) and the
+    cached client was built by a different factory.
+    """
+    global _shared_client, _shared_factory
+    if _shared_client is None or _shared_factory is not make_client:
+        if _shared_client is not None:
+            _shared_client.close()
+        _shared_client = make_client()
+        _shared_factory = make_client
+    return _shared_client
 
 
 def build_request(delivery: Delivery, subscriber: Subscriber) -> tuple[bytes, dict[str, str]]:
@@ -49,44 +73,72 @@ def build_request(delivery: Delivery, subscriber: Subscriber) -> tuple[bytes, di
     return body, headers
 
 
+_LOAD = (
+    select(Delivery, Subscriber)
+    .join(Subscriber, Subscriber.id == Delivery.subscriber_id, isouter=True)
+    .where(Delivery.id == bindparam("id"))
+)
+# The subscriber's last_delivery_ok_at is refreshed at most once per second: every delivery
+# to a subscriber touches the same row, and with concurrent workers that single-row lock was
+# the throughput ceiling (see docs/DEVELOPER_GUIDE.md "Performance"). One-second resolution
+# is plenty for idle detection (minutes) and the admin view.
+_RECORD_SUCCESS = text(
+    """
+    WITH d AS (
+        UPDATE deliveries
+           SET status = 'delivered', delivered_at = :now, last_error = NULL,
+               attempts = attempts + 1
+         WHERE id = :id
+     RETURNING subscriber_id
+    )
+    UPDATE subscribers SET last_delivery_ok_at = :now
+     WHERE id IN (SELECT subscriber_id FROM d)
+       AND (last_delivery_ok_at IS NULL OR last_delivery_ok_at < :stale)
+    """
+)
+_RECORD_ERROR = text(
+    "UPDATE deliveries SET attempts = attempts + 1, last_error = :err WHERE id = :id"
+)
+_RECORD_ORPHAN = text(
+    "UPDATE deliveries SET status = 'failed', last_error = 'subscriber removed' WHERE id = :id"
+)
+
+
 def attempt_delivery(delivery_id: int, client: httpx.Client | None = None) -> bool:
     """One delivery attempt. Returns True on success; raises httpx.HTTPError on failure.
 
-    Updates attempts/last_error on the Delivery row either way.
+    Updates attempts/last_error on the Delivery row either way. Runs on the autocommit engine:
+    one SELECT (delivery joined to its subscriber) and one UPDATE, so two round trips per attempt.
     """
-    with sync_sessionmaker()() as session:
-        delivery = session.get(Delivery, delivery_id)
-        if delivery is None or delivery.status == "delivered":
+    with autocommit_sessionmaker()() as session:
+        row = session.execute(_LOAD, {"id": delivery_id}).first()
+        if row is None:
             return True
-        subscriber = session.get(Subscriber, delivery.subscriber_id)
+        delivery, subscriber = row.tuple()
+        if delivery.status == "delivered":
+            return True
         if subscriber is None:
-            delivery.status = "failed"
-            delivery.last_error = "subscriber removed"
-            session.commit()
+            session.execute(_RECORD_ORPHAN, {"id": delivery_id})
             return True
         body, headers = build_request(delivery, subscriber)
-        delivery.attempts += 1
+        attempt = delivery.attempts + 1
         started = time.perf_counter()
         log_fields = {
             "delivery_id": delivery.id,
             "event_id": str(delivery.event_id),
             "subscriber": subscriber.name,
-            "attempt": delivery.attempts,
+            "attempt": attempt,
         }
         try:
-            http = client or make_client()
-            try:
-                resp = http.post(subscriber.webhook_url, content=body, headers=headers)
-                resp.raise_for_status()
-            finally:
-                if client is None:
-                    http.close()
+            http = client or shared_client()
+            resp = http.post(subscriber.webhook_url, content=body, headers=headers)
+            resp.raise_for_status()
         except httpx.HTTPError as exc:
             elapsed = (time.perf_counter() - started) * 1000
             _attempts.add(1, {"outcome": "error"})
             _duration.record(elapsed, {"outcome": "error"})
-            delivery.last_error = f"{type(exc).__name__}: {exc}"[:2000]
-            session.commit()
+            err = f"{type(exc).__name__}: {exc}"[:2000]
+            session.execute(_RECORD_ERROR, {"id": delivery_id, "err": err})
             log.warning(
                 "delivery attempt failed: %s",
                 exc,
@@ -101,11 +153,9 @@ def attempt_delivery(delivery_id: int, client: httpx.Client | None = None) -> bo
             extra={**log_fields, "duration_ms": round(elapsed, 2), "http_status": resp.status_code},
         )
         now = datetime.now(UTC)
-        delivery.status = "delivered"
-        delivery.delivered_at = now
-        delivery.last_error = None
-        subscriber.last_delivery_ok_at = now
-        session.commit()
+        session.execute(
+            _RECORD_SUCCESS, {"id": delivery_id, "now": now, "stale": now - timedelta(seconds=1)}
+        )
     get_stats().incr("delivered")
     return True
 

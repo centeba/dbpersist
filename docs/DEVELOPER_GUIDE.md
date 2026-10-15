@@ -18,6 +18,7 @@ Contents
 12. [Coding conventions](#12-coding-conventions)
 13. [Common tasks](#13-common-tasks)
 14. [Troubleshooting](#14-troubleshooting)
+15. [Performance](#15-performance)
 
 ## 1. Architecture
 
@@ -104,15 +105,16 @@ Adding an endpoint: add the schema to `schemas.py`, the logic to a `services/` m
 ## 5. Pub/sub service internals
 
 - **`models.py`**: `Subscriber(name, webhook_url, secret, last_seen_at, last_delivery_ok_at)`, `Subscription(type_name, filter | keys, by)` with a CHECK constraint that exactly one of filter/keys is set, and `Delivery(event_id, subscriber_id, subscription_ids, event, status, attempts, last_error, delivered_at)`.
-- **`matching.py`**: `subscription_matches` evaluates a filter with `common.filters.matches` against `event.data` plus `key`, `version` and `id`; key subscriptions compare `event.key` (or `object_id` when `by == "id"`). `select_matching` groups matching subscription ids per subscriber.
-- **`tasks/match.py`**: task `pubsub.publish_event` → `fan_out` validates the event, loads subscriptions for the type, inserts one pending `Delivery` per subscriber, then enqueues `deliver_webhook` for each.
-- **`tasks/deliver.py`**: `attempt_delivery` builds the signed request (`common.signing`), POSTs with a 10 s timeout, records attempts/duration metrics and a log line, and updates the row. The Celery task retries on `httpx.HTTPError` with exponential backoff and jitter (`backoff_seconds`), up to `WEBHOOK_MAX_RETRIES`; after that the delivery is marked `failed` and can be replayed via `POST /subscribers/{id}/replay`.
+- **`matching.py`**: `subscription_matches` evaluates a filter with `common.filters.matches` against `event.data` plus `key`, `version` and `id`; key subscriptions compare `event.key` (or `object_id` when `by == "id"`). `select_matching` groups matching subscription ids per subscriber. Parsed filters are cached per subscription id (`parsed_filter`): parsing costs ~20 µs, evaluating ~1 µs, and subscriptions are immutable, so the cache never goes stale.
+- **`tasks/match.py`**: task `pubsub.publish_event` → `fan_out` validates the event, loads subscriptions for the type and inserts one pending `Delivery` per subscriber (two autocommit statements). When exactly one subscriber matched and `DELIVER_INLINE` is on (default), the first webhook attempt is made inline and the second Celery hop is skipped; on failure the delivery is handed to `deliver_webhook` with `retries=1`, so the retry schedule and attempt count are the same as before. With several subscribers, one `deliver_webhook` task is enqueued per delivery.
+- **`tasks/deliver.py`**: `attempt_delivery` loads the delivery joined to its subscriber (one SELECT), builds the signed request (`common.signing`), POSTs with a 10 s timeout through one keep-alive `httpx.Client` per worker process (`shared_client`), records attempts/duration metrics and a log line, and writes the outcome with one UPDATE on the autocommit engine. The subscriber's `last_delivery_ok_at` is refreshed at most once per second, because every delivery to a subscriber otherwise locks the same row. The Celery task retries on `httpx.HTTPError` with exponential backoff and jitter (`backoff_seconds`), up to `WEBHOOK_MAX_RETRIES`; after that the delivery is marked `failed` and can be replayed via `POST /subscribers/{id}/replay`.
 - **`tasks/cleanup.py`**: beat jobs remove subscribers idle beyond `IDLE_SUBSCRIBER_MINUTES` (no heartbeat and no successful delivery) and prune deliveries older than `DELIVERY_RETENTION_DAYS`.
 - **`stats.py`**: Redis counters for the admin `/stats` endpoint, mirrored to OpenTelemetry counters.
 - **`routers/admin.py`**: clients with subscription/pending/failed counts, criteria by client, stats, manual idle cleanup, runtime log level.
-- **`celery_app.py`**: broker/queue config (`events`, `deliveries`), beat schedule, and worker-process telemetry setup via the `worker_init` / `worker_process_init` signals.
+- **`celery_app.py`**: broker/queue config (`events`, `deliveries`), beat schedule, a 120 s hard time limit (a timed-out or lost task is requeued, not acked), and worker-process telemetry setup via the `worker_init` / `worker_process_init` signals.
+- **`db.py`**: `sync_engine()` (no `pool_pre_ping`: it cost a round trip per checkout, and a stale connection already fails into Celery's retry/requeue path; `pool_recycle` drops connections after 30 minutes) and `autocommit_engine()`, the same pool in AUTOCOMMIT mode for the task hot paths.
 
-Celery on Windows needs `--pool=threads`; the Docker image uses prefork.
+Celery on Windows needs `--pool=threads`; the Docker image uses prefork with one child per core (see [§15](#15-performance) for why).
 
 ## 6. Filter DSL
 
@@ -207,6 +209,8 @@ All settings are environment variables (or `.env`), read by pydantic-settings; n
 | `WEBHOOK_TIMEOUT_SECONDS` | 10 | pubsub | per-POST timeout |
 | `WEBHOOK_MAX_RETRIES` | 8 | pubsub | retries before `failed` |
 | `WEBHOOK_BACKOFF_MAX_SECONDS` | 600 | pubsub | backoff cap |
+| `DELIVER_INLINE` | `true` | pubsub worker | first webhook attempt inside `publish_event` when one subscriber matches |
+| `PUBSUB_WORKER_CONCURRENCY` | 16 | docker-compose | prefork children of `pubsub-worker` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | empty (off) | all | collector base URL |
 | `OTEL_SERVICE_NAME` | per process | all | overrides the built-in service name |
 | `OTEL_SERVICE_VERSION` | `0.1.0` | all | resource attribute |
@@ -267,6 +271,8 @@ uv run pyright packages          # source is clean; tests have a few Optional-na
 
 **Add a metric.** Create it from `get_meter("dbpersist.<service>")` at module level next to the code that records it; document it in §8.
 
+**Measure pub/sub throughput.** Run `scripts/bench_pubsub.py` inside the Docker network (§15). Compare the `drain rate` line before and after a change; keep the per-task round-trip count (DB statements, Redis commands, Celery hops) from growing, that is what the worker is bound by.
+
 ## 14. Troubleshooting
 
 | Symptom | Cause / fix |
@@ -279,4 +285,34 @@ uv run pyright packages          # source is clean; tests have a few Optional-na
 | `uv sync` cannot download Python | Corporate TLS interception. Use an installed interpreter (`uv python list`) and keep `.python-version` at one that exists locally. |
 | Integration tests all skip | The live services are not reachable at `PERSIST_URL`/`PUBSUB_URL`. |
 | Integration tests all 401 | A stray `API_KEY` in the environment or `.env` differs from the running services. |
+| A `pubsub.publish_event` task shows as active for minutes (`celery inspect active`) | A prefork child blocked in `getaddrinfo` while opening a DB connection (seen on Docker Desktop under a 16-process startup burst). The 120 s task time limit kills the child and requeues the message. |
 | No traces or logs in Grafana | `OTEL_EXPORTER_OTLP_ENDPOINT` unset, or the container is not on `observability_default`. The service logs `telemetry: exporting to …` at startup when export is on. |
+
+## 15. Performance
+
+Measured with `scripts/bench_pubsub.py` on Docker Desktop (WSL2, 20 CPUs) against the compose stack: one subscriber with 20 filter subscriptions on the event type (one matches), a receiver inside the bench container, 6000 events published at concurrency 64. Numbers are the worker's **drain rate** (first to last webhook arrival with the backlog queued before the worker starts), which isolates the worker from the intake API. Runs vary by ±15% on this host; ranges are from several runs.
+
+| Worker container | Drain rate | Worker CPU during drain |
+|---|---|---|
+| before (`54cb3e3`), `-P prefork -c 8` | 99–146 /s | ~700% (all 8 children saturated) |
+| after, `-P threads -c 32` | 131–158 /s | ~117% (one core: GIL-bound) |
+| after, `-P prefork -c 8` | ~300–410 /s | ~390% |
+| after, `-P prefork -c 16` (compose default) | 400–500 /s | ~450–630% |
+
+End to end with the compose default, same bench (N=4000, C=64): before, intake 205 /s and delivery 90 /s with p50 latency 6.8 s (queue grows); after, delivery keeps pace with intake (~330 /s, bounded by the pubsub API's two uvicorn workers and the bench publisher). A single event stream (C=1): p50 485 ms before, 11 ms after.
+
+What changed and why:
+
+- **Fewer round trips per event.** Before: two Celery hops (publish, then deliver), six Postgres round trips per delivery (BEGIN, two SELECTs, two UPDATEs, COMMIT), a pre-ping per checkout, a new `httpx.Client` (new TCP connection) per POST and three Redis counter commands. After: one Celery hop for the common single-subscriber case, two autocommit statements for fan-out and two for delivery, one keep-alive client per process, two pipelined counter commands. Per-task CPU, not webhook latency, is what bounds a worker on a local network, so this is where the gain comes from.
+- **Cached filter parsing.** `parse_filter` ran per subscription per event (~20 µs each); it now runs once per subscription.
+- **No single-row hot spot.** Every delivery updated `subscribers.last_delivery_ok_at`; with 16 workers that row lock was the next ceiling (`Lock:transactionid` in `pg_stat_activity`). It is now refreshed at most once per second.
+- **Pool choice.** The threads pool was tried first (`-P threads -c 32`): it was *slower* than 8 prefork children because the remaining per-task work (SQLAlchemy, kombu, httpx, logging) is Python and serialises on the GIL at ~100 tasks/s/core. Prefork scales with cores until the parent process (one process that reads the broker, feeds children over pipes and acks) and Postgres become the limit at ~450 /s per container; beyond that, run more containers. Threads remain the right pool on Windows (`--pool=threads`) and would win only when webhook RTT, not CPU, dominates (slow remote receivers); then raise `-c` on the threads pool or split queues across a prefork worker (`-Q events`) and a threads worker (`-Q deliveries`), both of which the task routing already supports.
+- **Inline first attempt** (`DELIVER_INLINE`). Saves the second hop and its three Redis commands. The cost is that a slow receiver now occupies a child of the shared pool for up to `WEBHOOK_TIMEOUT_SECONDS` during matching; set `DELIVER_INLINE=false` to restore the strict separation (the `deliveries` queue then carries every attempt).
+
+Running the probe (from the repository root, stack up):
+
+```bash
+docker run --rm --network dbpersist_default --name bench -v "$PWD/scripts/bench_pubsub.py:/bench.py" -e PUBSUB_URL=http://pubsub-api:8002/v1 -e WEBHOOK=http://bench:9102/hook dbpersist-persistence:latest python /bench.py
+```
+
+`N`, `C` and `FILTER_SUBS` are environment variables. For the drain rate, `docker compose stop pubsub-worker`, start the bench with `-e WAIT=120`, and `docker compose start pubsub-worker` once it prints `accepted`.

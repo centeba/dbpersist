@@ -39,6 +39,7 @@ def _otel_incr(name: str, n: int) -> None:
 
 class Stats(Protocol):
     def incr(self, name: str, n: int = 1) -> None: ...
+    def incr_many(self, counts: dict[str, int]) -> None: ...
     def get(self, name: str) -> int: ...
 
 
@@ -48,9 +49,17 @@ class RedisStats:
         self._prefix = prefix
 
     def incr(self, name: str, n: int = 1) -> None:
-        _otel_incr(name, n)
+        self.incr_many({name: n})
+
+    def incr_many(self, counts: dict[str, int]) -> None:
+        """Several counters in one Redis round trip (pipelined)."""
+        for name, n in counts.items():
+            _otel_incr(name, n)
         try:
-            self._r.incrby(self._prefix + name, n)
+            with self._r.pipeline(transaction=False) as pipe:
+                for name, n in counts.items():
+                    pipe.incrby(self._prefix + name, n)
+                pipe.execute()
         except redis.RedisError:
             pass
 
@@ -69,6 +78,10 @@ class MemoryStats:
     def incr(self, name: str, n: int = 1) -> None:
         _otel_incr(name, n)
         self.counts[name] = self.counts.get(name, 0) + n
+
+    def incr_many(self, counts: dict[str, int]) -> None:
+        for name, n in counts.items():
+            self.incr(name, n)
 
     def get(self, name: str) -> int:
         return self.counts.get(name, 0)
