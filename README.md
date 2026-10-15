@@ -9,7 +9,7 @@ Typed, versioned object persistence with change notification, as two small servi
 | **`packages/sdk`** | Async httpx client with `on_insert / on_update / on_delete` callbacks, nested transactions, and a FastAPI webhook receiver |
 | **`packages/common`** | JSON filter DSL (one evaluator for SQL and for in-memory matching), event model, signing, API-key auth, logging and OpenTelemetry setup |
 
-Documentation: [Developer guide](docs/DEVELOPER_GUIDE.md) · [Test cases](docs/TEST_CASES.md)
+Documentation: [Architecture](docs/ARCHITECTURE.md) · [Developer guide](docs/DEVELOPER_GUIDE.md) · [Test cases](docs/TEST_CASES.md) · [Example application](examples/order-desk/README.md)
 
 ## How it fits together
 
