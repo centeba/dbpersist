@@ -35,19 +35,19 @@ Out of scope: multi-region replication, a query language beyond the filter DSL (
 ```mermaid
 flowchart LR
     subgraph Clients
-        A[Application A<br/>writer + subscriber]
-        B[Application B<br/>subscriber]
-        X[External producer]
+        A["Application A<br/>writer + subscriber"]
+        B["Application B<br/>subscriber"]
+        X["External producer"]
     end
     subgraph dbpersist
-        P[Persistence service]
-        S[Pub/sub service API]
-        W[Pub/sub workers]
+        P["Persistence service"]
+        S["Pub/sub service API"]
+        W["Pub/sub workers"]
     end
     subgraph Infrastructure
-        PG[(Postgres<br/>persist + pubsub DBs)]
-        R[(Redis<br/>Celery broker, counters)]
-        O[Observability platform<br/>OTLP collector, Loki, Tempo, Prometheus, Grafana]
+        PG[("Postgres<br/>persist + pubsub DBs")]
+        R[("Redis<br/>Celery broker, counters")]
+        O["Observability platform<br/>OTLP collector, Loki, Tempo, Prometheus, Grafana"]
     end
 
     A -- "REST (SDK)" --> P
@@ -84,24 +84,24 @@ The two services share nothing at the code level except `common`, and nothing at
 ```mermaid
 flowchart TB
     subgraph persistence["Persistence service"]
-        PR[routers: types, objects,<br/>transactions, publish]
-        PS[services: objects, query, events]
-        PM[models: ObjectType, Object]
+        PR["routers: types, objects,<br/>transactions, publish"]
+        PS["services: objects, query, events"]
+        PM["models: ObjectType, Object"]
         PR --> PS --> PM
     end
     subgraph pubsub["Pub/sub service"]
-        SR[routers: subscribers, subscriptions,<br/>publish, admin]
-        ST[tasks: match, deliver, cleanup]
-        SM2[matching]
-        SMo[models: Subscriber,<br/>Subscription, Delivery]
+        SR["routers: subscribers, subscriptions,<br/>publish, admin"]
+        ST["tasks: match, deliver, cleanup"]
+        SM2["matching"]
+        SMo["models: Subscriber,<br/>Subscription, Delivery"]
         SR --> SMo
         ST --> SM2 --> SMo
     end
     subgraph common
-        F[filters: models, sqla, evaluate]
-        E[events: ObjectEvent]
-        K[keys, signing, auth]
-        T[telemetry]
+        F["filters: models, sqla, evaluate"]
+        E["events: ObjectEvent"]
+        K["keys, signing, auth"]
+        T["telemetry"]
     end
     PS --> F & E & K & T
     SM2 --> F
@@ -118,7 +118,7 @@ erDiagram
     OBJECT_TYPES ||--o{ OBJECTS : "type_name"
     OBJECT_TYPES {
         text name PK
-        text[] key_fields
+        text_array key_fields
         jsonb json_schema
         timestamptz created_at
     }
@@ -157,14 +157,14 @@ erDiagram
         uuid subscriber_id FK
         text type_name
         jsonb filter "filter tree, or null"
-        text[] keys "object keys or ids, or null"
+        text_array keys "object keys or ids, or null"
         text by "key | id"
     }
     DELIVERIES {
         bigint id PK
         uuid event_id
         uuid subscriber_id FK
-        uuid[] subscription_ids
+        uuid_array subscription_ids
         jsonb event "full event payload"
         text status "pending | delivered | failed"
         int attempts
@@ -207,14 +207,14 @@ sequenceDiagram
     participant Rcv as App webhook receiver
 
     App->>P: PATCH /objects/Trade/{id} {version: 2, data: {qty: 160}}
-    P->>DB: SELECT ... FOR UPDATE; check version == 2
-    P->>DB: UPDATE data, version = 3; COMMIT
+    P->>DB: SELECT ... FOR UPDATE, check version == 2
+    P->>DB: UPDATE data, version = 3, COMMIT
     P->>R: send_task("pubsub.publish_event", event)
     P-->>App: 200 {version: 3, ...}
     R->>W: publish_event(event)
     W->>PDB: SELECT subscriptions WHERE type_name = 'Trade'
     Note over W: evaluate filters in memory,<br/>group matches per subscriber
-    W->>PDB: INSERT deliveries (pending) ; COMMIT
+    W->>PDB: INSERT deliveries (pending) , COMMIT
     W->>R: deliver_webhook(delivery_id) per subscriber
     R->>W: deliver_webhook(delivery_id)
     W->>Rcv: POST webhook, HMAC signature, traceparent
@@ -254,11 +254,11 @@ sequenceDiagram
     participant R as Redis
     Ext->>P: POST /v1/inbound/clearing (their envelope, their signature)
     P->>P: verify signature, parse JSON
-    P->>DB: INSERT inbound_messages (pending); COMMIT
+    P->>DB: INSERT inbound_messages (pending), COMMIT
     P-->>Ext: 202 Accepted {message_id}
-    Proc->>DB: lock source FOR UPDATE SKIP LOCKED; next pending message in id order
-    Proc->>Proc: map envelope -> typed events; dedupe on external id
-    Proc->>DB: upsert objects / record receipts; message done; COMMIT
+    Proc->>DB: lock source FOR UPDATE SKIP LOCKED, next pending message in id order
+    Proc->>Proc: map envelope -> typed events, dedupe on external id
+    Proc->>DB: upsert objects / record receipts, message done, COMMIT
     Proc->>R: send_task("pubsub.publish_event") per change
     Note over Proc: transient error: next_attempt_at = now + backoff<br/>too many: status = failed, move on
     Note over Proc,Ext: optional pull: every interval GET the feed with the stored cursor,<br/>enqueue the page as a message with origin = pull
@@ -339,15 +339,15 @@ Export is over OTLP/HTTP to whatever collector `OTEL_EXPORTER_OTLP_ENDPOINT` nam
 ```mermaid
 flowchart TB
     subgraph compose["docker compose project: dbpersist"]
-        PG[(postgres:16<br/>databases persist, pubsub)]
-        RD[(redis:7)]
-        PS[persistence<br/>uvicorn x2 :8001]
-        PA[pubsub-api<br/>uvicorn x2 :8002]
-        PW[pubsub-worker<br/>celery, queues events + deliveries]
-        PB[pubsub-beat<br/>celery beat]
+        PG[("postgres:16<br/>databases persist, pubsub")]
+        RD[("redis:7")]
+        PS["persistence<br/>uvicorn x2 :8001"]
+        PA["pubsub-api<br/>uvicorn x2 :8002"]
+        PW["pubsub-worker<br/>celery, queues events + deliveries"]
+        PB["pubsub-beat<br/>celery beat"]
     end
     subgraph obs["docker compose project: observability (optional overlay)"]
-        OC[otel-collector :4318]
+        OC["otel-collector :4318"]
     end
     PS & PA & PW --> PG
     PS & PA & PW & PB --> RD
