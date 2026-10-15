@@ -19,6 +19,10 @@ celery_app.conf.update(
     task_acks_on_failure_or_timeout=False,
     task_reject_on_worker_lost=True,
     worker_prefetch_multiplier=4,
+    # Keep the real stdout in prefork children: with the redirect, the JSON handler installed
+    # by worker_process_init writes into Celery's LoggingProxy, which drops its own re-entrant
+    # output, so task log lines never appeared.
+    worker_redirect_stdouts=False,
     task_serializer="json",
     accept_content=["json"],
     broker_connection_retry_on_startup=True,

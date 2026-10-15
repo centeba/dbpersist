@@ -111,7 +111,7 @@ Adding an endpoint: add the schema to `schemas.py`, the logic to a `services/` m
 - **`tasks/cleanup.py`**: beat jobs remove subscribers idle beyond `IDLE_SUBSCRIBER_MINUTES` (no heartbeat and no successful delivery) and prune deliveries older than `DELIVERY_RETENTION_DAYS`.
 - **`stats.py`**: Redis counters for the admin `/stats` endpoint, mirrored to OpenTelemetry counters.
 - **`routers/admin.py`**: clients with subscription/pending/failed counts, criteria by client, stats, manual idle cleanup, runtime log level.
-- **`celery_app.py`**: broker/queue config (`events`, `deliveries`), beat schedule, a 120 s hard time limit (a timed-out or lost task is requeued, not acked), and worker-process telemetry setup via the `worker_init` / `worker_process_init` signals.
+- **`celery_app.py`**: broker/queue config (`events`, `deliveries`), beat schedule, a 120 s hard time limit (a timed-out or lost task is requeued, not acked), `worker_redirect_stdouts=False` (with the redirect, the JSON handler installed in prefork children wrote into Celery's logging proxy and every task log line was dropped), and worker-process telemetry setup via the `worker_init` / `worker_process_init` signals.
 - **`db.py`**: `sync_engine()` (no `pool_pre_ping`: it cost a round trip per checkout, and a stale connection already fails into Celery's retry/requeue path; `pool_recycle` drops connections after 30 minutes) and `autocommit_engine()`, the same pool in AUTOCOMMIT mode for the task hot paths.
 
 Celery on Windows needs `--pool=threads`; the Docker image uses prefork with one child per core (see [§15](#15-performance) for why).
@@ -149,6 +149,8 @@ The two implementations are kept in lock-step by `packages/persistence/tests/tes
 All of it lives in `common/telemetry.py` and is switched on by `init_telemetry(service_name, settings)` in each service's `create_app` and in the Celery worker signals.
 
 **Logs.** Structured JSON on stdout by default (`LOG_FORMAT=text` for a human format), one object per line with `ts`, `level`, `logger`, `service`, `message`, any `extra={...}` fields, and `trace_id`/`span_id` when written inside a span. A request-log middleware writes one line per HTTP request (`http_method`, `http_path`, `http_status`, `duration_ms`, `client_ip`), replacing uvicorn's access log; `/health` and `/healthz` are not logged. Domain events log with `event_id`, `type_name`, `op`, `object_key`, `object_version`, `changed_fields`, `transaction_id`; deliveries log with `delivery_id`, `subscriber`, `attempt`, `duration_ms`, `http_status`.
+
+**Celery prefork children.** Each child runs `init_telemetry` again from the `worker_process_init` signal, which installs a fresh `StreamHandler(sys.stdout)`. The worker sets `worker_redirect_stdouts=False`: with Celery's default redirect, `sys.stdout` in the child is Celery's `LoggingProxy`, so the handler wrote each record into a logger that fed the same handler again, and the proxy's re-entrancy guard dropped every task log line (`event matched`, `delivered`) while the parent's banner still appeared. The proxy only ever mattered for bare `print()` calls, which the code base does not use.
 
 Write logs with fields, not formatted strings:
 
@@ -278,6 +280,7 @@ uv run pyright packages          # source is clean; tests have a few Optional-na
 | Symptom | Cause / fix |
 |---|---|
 | `password authentication failed` or `port is already allocated` on startup | Another Postgres/Redis owns the default ports; dbpersist expects 5442/6389. Check `docker ps` and `.env`. |
+| Worker prints its banner but no task log lines | `worker_redirect_stdouts` must stay off: Celery's stdout proxy swallows the JSON handler's output in prefork children. |
 | Writes succeed but no webhooks arrive | Is a worker running and consuming `events,deliveries`? Check `GET /v1/admin/clients` for `pending` counts and `GET /v1/admin/stats`. In Docker, the receiver must be reachable from the worker container (`host.docker.internal`). |
 | Deliveries end up `failed` | The receiver returned non-2xx or timed out for all retries. Fix the receiver, then `POST /v1/subscribers/{id}/replay?since=...`. |
 | `MissingGreenlet` from SQLAlchemy | An ORM attribute was touched after a rollback or outside the async context. Capture values before `rollback()`; do not enable `pool_pre_ping` on the asyncpg engine. |
