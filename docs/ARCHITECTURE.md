@@ -289,7 +289,7 @@ A transaction is a single HTTP request carrying an ordered list of insert, updat
 | Write atomicity | Single-object writes and multi-op transactions are atomic in Postgres. |
 | Concurrency control | Optimistic: every update and delete carries the version the caller read; a mismatch is rejected with the current version and nothing changes. |
 | Key uniqueness | Enforced by the database among live objects of a type. |
-| Event emission | At-least-once relative to commits, except the commit-then-enqueue window described in §5, which is surfaced as a 502. |
+| Event emission | At-least-once relative to commits, except the commit-then-enqueue window described in §5, which is surfaced as a 502. With `PUBSUB_ENABLED=false` no events are emitted at all; they are counted and dropped. |
 | Event ordering | Events for one object are produced in version order. Delivery order to a subscriber is **not** guaranteed under retries or parallel workers; consumers must use `version` to discard stale updates. |
 | Delivery | At-least-once per matching subscriber. A subscriber with several matching subscriptions receives one webhook listing all matching subscription ids. Fan-out is idempotent per `(event_id, subscriber_id)` (unique index), so a `publish_event` message redelivered after a worker crash (Celery acks late) re-attempts the delivery rows it already created instead of inserting new ones; a duplicate webhook is still possible when the crash happened after the POST but before the row was marked delivered, so receivers should treat `event_id` as an idempotency key. |
 | Delivery durability | Every delivery is a database row before the first POST; failed deliveries remain replayable for `DELIVERY_RETENTION_DAYS`. |
@@ -377,7 +377,7 @@ A load probe run inside the Docker network on a developer laptop, with one worke
 |---|---|---|
 | Postgres (persist) down | Persistence writes and reads fail; `/healthz` reports database down. Pub/sub continues delivering already-queued events. | Restore the database; no data loss for committed writes. |
 | Postgres (pubsub) down | Workers cannot record or update deliveries; tasks fail and Celery retries them; the API cannot register or subscribe. | Restore; queued tasks resume. Events remain in Redis until processed. |
-| Redis down | Persistence writes still commit but the enqueue fails and the API returns 502; workers idle. | Restore Redis; replay events for the affected window via `POST /subscribers/{id}/replay` once deliveries exist, or re-publish from the producer. |
+| Redis down | Persistence writes still commit but the enqueue fails and the API returns 502; workers idle. Not applicable when `PUBSUB_ENABLED=false`: persistence has no Redis dependency and writes return normally. | Restore Redis; replay events for the affected window via `POST /subscribers/{id}/replay` once deliveries exist, or re-publish from the producer. |
 | Worker crash mid-task | Celery acknowledges late, so the task is redelivered to another worker. A webhook that was sent but not recorded may be sent twice. | Receivers de-duplicate on `event_id`. |
 | Subscriber endpoint down | Deliveries to that subscriber retry with backoff, then mark `failed`; other subscribers are unaffected. Admin views show pending and failed counts per subscriber. | Fix the endpoint, then replay. |
 | Subscriber silently gone | No heartbeats and no successful deliveries past `IDLE_SUBSCRIBER_MINUTES`. | The beat job removes the subscriber and its subscriptions; deliveries cascade. |
