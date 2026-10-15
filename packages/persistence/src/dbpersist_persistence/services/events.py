@@ -56,6 +56,18 @@ class CeleryEventPublisher:
             _record(ev)
 
 
+class NullPublisher:
+    """Used when PUBSUB_ENABLED is false: events are counted and dropped, nothing is sent."""
+
+    def __init__(self) -> None:
+        self.dropped = 0
+
+    def publish(self, events: list[ObjectEvent]) -> None:
+        self.dropped += len(events)
+        for ev in events:
+            _record(ev)
+
+
 class RecordingPublisher:
     """Test double: keeps every event in memory."""
 

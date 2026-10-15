@@ -22,7 +22,11 @@ from dbpersist_persistence.services.errors import (
     NotFound,
     VersionConflict,
 )
-from dbpersist_persistence.services.events import CeleryEventPublisher, EventPublisher
+from dbpersist_persistence.services.events import (
+    CeleryEventPublisher,
+    EventPublisher,
+    NullPublisher,
+)
 from dbpersist_persistence.services.inbound_queue import run_processor
 from dbpersist_persistence.settings import Settings
 
@@ -65,7 +69,13 @@ def create_app(
 
     app = FastAPI(title="dbpersist persistence", version="0.1.0", lifespan=lifespan)
     app.state.settings = settings
-    app.state.publisher = publisher or CeleryEventPublisher(make_producer(settings.redis_url))
+    if publisher is not None:
+        app.state.publisher = publisher
+    elif settings.pubsub_enabled:
+        app.state.publisher = CeleryEventPublisher(make_producer(settings.redis_url))
+    else:
+        log.warning("pub/sub disabled (PUBSUB_ENABLED=false): change events are not published")
+        app.state.publisher = NullPublisher()
 
     for r in (
         types.router,

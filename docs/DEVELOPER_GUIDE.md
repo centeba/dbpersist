@@ -20,6 +20,7 @@ Contents
 14. [Troubleshooting](#14-troubleshooting)
 15. [Performance](#15-performance)
 16. [Inbound sources](#16-inbound-sources)
+17. [Running persistence without pub/sub](#17-running-persistence-without-pubsub)
 
 ## 1. Architecture
 
@@ -202,7 +203,8 @@ All settings are environment variables (or `.env`), read by pydantic-settings; n
 | Variable | Default | Used by | Meaning |
 |---|---|---|---|
 | `API_KEY` | `dev-api-key` | both APIs, SDK | value of the `X-API-Key` header |
-| `REDIS_URL` | `redis://localhost:6389/0` | both | Celery broker and pubsub stats |
+| `PUBSUB_ENABLED` | `true` | persistence | publish change events to pub/sub; `false` runs persistence alone with no Redis and no events |
+| `REDIS_URL` | `redis://localhost:6389/0` | both | Celery broker and pubsub stats (unused by persistence when `PUBSUB_ENABLED=false`) |
 | `PERSIST_DATABASE_URL` | `postgresql+asyncpg://…:5442/persist` | persistence | async DSN |
 | `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | 10 / 10 | persistence | asyncpg pool |
 | `PUBSUB_DATABASE_URL` | `postgresql+asyncpg://…:5442/pubsub` | pubsub API | async DSN |
@@ -429,3 +431,31 @@ sample batch, and `orderdesk/inbound.py` provides `register`, `test`, `simulate`
 `remove`. Adopting a new publisher means writing such a file, dry-running a real sample with
 `POST /inbound-sources/{name}/test` until every event maps or is deliberately rejected, and
 registering it. Nothing in dbpersist changes.
+
+## 17. Running persistence without pub/sub
+
+Pub/sub is optional. Set `PUBSUB_ENABLED=false` on the persistence service and it swaps the
+Celery publisher for a `NullPublisher` (`services/events.py`) that counts and drops events;
+no Celery producer is created, Redis is never contacted, and the pub/sub API, worker and beat
+need not exist. Every other feature is unchanged: object types, writes with optimistic locking,
+queries, transactions, publish-only calls, the inbound-source queue and pull, health probes and
+telemetry. The event log lines are still written (they are useful for auditing) even though no
+event leaves the process.
+
+Switching the flag later is safe in either direction. Turning pub/sub on starts publishing from
+that moment; there is no backfill of earlier changes, which is the same as for any new
+subscription. If a consumer needs history, it should `select` the current state first, as
+`active_select` does.
+
+Minimal single-service run:
+
+```bash
+docker compose up -d postgres
+uv run --package dbpersist-persistence alembic -c packages/persistence/alembic.ini upgrade head
+PUBSUB_ENABLED=false uv run --package dbpersist-persistence uvicorn dbpersist_persistence.main:app --port 8101
+```
+
+In compose, keep the `persistence` and `postgres` services and drop the others; remove the
+`redis` dependency from `persistence` in your override file if you do not want the container at
+all. The SDK works the same, you simply never call `register_subscriber`, `subscribe` or
+`active_select`.

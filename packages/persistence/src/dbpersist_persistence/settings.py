@@ -6,6 +6,11 @@ class Settings(CommonSettings):
     db_pool_size: int = 10
     db_max_overflow: int = 10
 
+    # Change-event publishing to the pub/sub service. With this off, persistence needs no
+    # Redis and no pub/sub deployment: writes, queries, transactions and inbound sources
+    # work unchanged, and committed changes simply emit no events.
+    pubsub_enabled: bool = True
+
     # Inbound queue processor (runs inside the API process; set false on instances that
     # should only serve HTTP, true on at least one)
     inbound_processor_enabled: bool = True

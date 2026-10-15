@@ -4,8 +4,8 @@ Typed, versioned object persistence with change notification, as two small servi
 
 | Component | What it is |
 |---|---|
-| **`packages/persistence`** | FastAPI + SQLAlchemy 2 (asyncpg) + Pydantic over Postgres JSONB: object types, versioned objects with optimistic locking, criteria queries, atomic transactions |
-| **`packages/pubsub`** | FastAPI API + Celery workers on Redis: subscriptions by filter or key, event matching, HMAC-signed webhook delivery with retries and replay |
+| **`packages/persistence`** | FastAPI + SQLAlchemy 2 (asyncpg) + Pydantic over Postgres JSONB: object types, versioned objects with optimistic locking, criteria queries, atomic transactions, and **inbound sources** that accept event notifications from outside systems through a durable, ordered, retrying queue |
+| **`packages/pubsub`** | FastAPI API + Celery workers on Redis: subscriptions by filter or key, event matching, HMAC-signed webhook delivery with retries and replay. Optional: persistence runs without it when `PUBSUB_ENABLED=false` |
 | **`packages/sdk`** | Async httpx client with `on_insert / on_update / on_delete` callbacks, nested transactions, and a FastAPI webhook receiver |
 | **`packages/common`** | JSON filter DSL (one evaluator for SQL and for in-memory matching), event model, signing, API-key auth, logging and OpenTelemetry setup |
 
@@ -17,6 +17,9 @@ Documentation: [Architecture](docs/ARCHITECTURE.md) · [Developer guide](docs/DE
 2. Every committed insert, update or delete is published as an **event** to Redis after the commit.
 3. The pub/sub worker matches each event against **subscriptions** (a filter tree or a list of keys) and POSTs a signed webhook to each matching **subscriber**, retrying with backoff.
 4. The SDK's receiver verifies the signature and calls your callbacks; `active_select` gives you the current rows and every change after them.
+5. Events from **outside systems** enter the same pipeline through an **inbound source**: the external publisher POSTs its own notifications to `/v1/inbound/{source}`, they are queued durably, mapped onto local types and applied as ordinary writes, so steps 2 to 4 happen for them too. Sources can also pull a publisher's feed.
+
+Persistence is usable on its own: with `PUBSUB_ENABLED=false` it needs only Postgres, keeps every write, query, transaction and inbound-source feature, and publishes no events.
 
 ## Quick start
 
@@ -131,7 +134,15 @@ Webhook requests carry `X-DBPersist-Signature: sha256=HMAC(secret, "<timestamp>.
 
 ## Inbound sources
 
-Events from outside systems can be brought in as well: register an **inbound source** with the sender's authentication (shared secret, bearer, basic, HMAC with configurable header and signed payload, or dbpersist's own scheme) and a mapping from its envelope to local types, keys, operations and payload, then point the sender at `POST /v1/inbound/{source}`. Messages are stored before they are acknowledged, processed one at a time per source in arrival order with retries and quarantine, deduplicated on the sender's event id, and can also be **pulled** from the publisher's feed on an interval with a stored cursor. Details in the [developer guide](docs/DEVELOPER_GUIDE.md#16-inbound-sources).
+Events from outside systems can be brought in as well, independently of whether pub/sub is deployed: register an **inbound source** with the sender's authentication (shared secret, bearer, basic, HMAC with configurable header and signed payload, or dbpersist's own scheme) and a mapping from its envelope to local types, keys, operations and payload, then point the sender at `POST /v1/inbound/{source}`. Messages are stored before they are acknowledged, processed one at a time per source in arrival order with retries and quarantine, deduplicated on the sender's event id, and can also be **pulled** from the publisher's feed on an interval with a stored cursor. Details in the [developer guide](docs/DEVELOPER_GUIDE.md#16-inbound-sources); the [order-desk example](examples/order-desk/README.md#bringing-in-an-external-publishers-events) shows a publisher profile kept as configuration in the consuming application, with register, dry-run and simulate commands.
+
+## Running without pub/sub
+
+If you only need the persistence API, set `PUBSUB_ENABLED=false` on the persistence service and run just Postgres and persistence. Nothing else changes: writes, queries, transactions, publish-only calls and inbound sources all behave the same, change events are counted and dropped instead of being sent to Redis, and the pub/sub containers, Redis and the SDK's subscriber methods are simply not used. Turning it back on later requires no data migration; events start flowing from that point.
+
+```bash
+PUBSUB_ENABLED=false uv run --package dbpersist-persistence uvicorn dbpersist_persistence.main:app --port 8101
+```
 
 ## Filter DSL
 

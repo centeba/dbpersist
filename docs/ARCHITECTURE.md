@@ -358,6 +358,8 @@ All Python services build from one image (`uv sync --frozen` of the workspace) a
 
 Nothing in the design is Docker-specific: the same four processes run under any orchestrator given a Postgres, a Redis, and the environment variables listed in the developer guide.
 
+**Persistence-only deployments.** Pub/sub is an optional half. With `PUBSUB_ENABLED=false` the persistence service substitutes a null publisher for the Celery producer: committed changes are counted and dropped, Redis is not contacted, and the pub/sub API, worker and beat are not deployed. Everything else, including inbound sources, is unaffected, and the flag can be turned on later without migration.
+
 ## 11. Scaling and capacity
 
 Scaling dimensions, from most to least elastic:
@@ -397,6 +399,7 @@ A load probe run inside the Docker network on a developer laptop, with one worke
 | Shared static API key | OAuth2 / JWT | Service-to-service deployment behind a gateway; keeps the surface small. Swappable in one dependency. |
 | Inbound queue in Postgres, processed by the API process | Celery task per inbound message; process synchronously | The sender is acknowledged once the row is committed, independent of processing; per-source ordering comes from one row lock; no new runtime component. A dedicated processor instance is a flag away (`INBOUND_PROCESSOR_ENABLED`). |
 | Publisher profiles are configuration owned by the consumer | Per-publisher adapters inside dbpersist | Keeps the service vendor-neutral and testable in isolation; a new publisher is a JSON profile (auth scheme, envelope mapping, feed URL) validated with the dry-run endpoint, as the order-desk example's `inbound/clearing-firm.json` shows. |
+| Pub/sub switchable off with one flag | Always-on event publishing | Persistence is useful alone; a null publisher keeps the write path identical, avoids a hard Redis dependency, and lets a deployment grow into pub/sub later without migration. |
 | Pull as an optional complement to push | Push only | Publishers stop pushing, miss deliveries or offer backfill feeds; pulling the same feed into the same queue with the same dedupe covers all three. |
 | Sync SQLAlchemy in workers, async in APIs | Async everywhere | Celery prefork and asyncio do not mix; the two engines share the ORM models. |
 | JSON filter DSL instead of a text grammar | SQL fragments; a custom parser | Validated by Pydantic, safe to store and execute, trivially translatable to SQL and to in-memory checks. |
