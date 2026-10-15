@@ -71,7 +71,7 @@ Clients talk to dbpersist over HTTP with a static API key. dbpersist talks back 
 
 | Component | Package | Runtime | Responsibility |
 |---|---|---|---|
-| Persistence service | `packages/persistence` | FastAPI on uvicorn, SQLAlchemy 2 async with asyncpg | Object types, versioned JSONB objects, criteria queries, keyset paging, atomic multi-object transactions, publish-only events. Emits one event per committed change. |
+| Persistence service | `packages/persistence` | FastAPI on uvicorn, SQLAlchemy 2 async with asyncpg | Object types, versioned JSONB objects, criteria queries, keyset paging, atomic multi-object transactions, publish-only events. Emits one event per committed change. Hosts the **inbound sources**: authenticated ingress for external publishers, a durable per-source message queue with ordered processing and retries, optional polling of a publisher's feed. |
 | Pub/sub API | `packages/pubsub` | FastAPI on uvicorn | Subscriber registration and secrets, subscriptions, event ingress from external producers, replay, admin and health endpoints. |
 | Pub/sub workers | `packages/pubsub` | Celery on Redis | Match events to subscriptions, record deliveries, POST signed webhooks with retries, housekeeping (idle subscribers, delivery retention). |
 | SDK | `packages/sdk` | Python library (httpx, FastAPI router) | Typed client for both services, nested transactions, identity cache, callback dispatch from a webhook receiver. |
@@ -241,6 +241,29 @@ sequenceDiagram
 
 The SDK subscribes first and queries second. A change that lands between the two calls is therefore delivered as a webhook even if the query already returned it; the receiver reconciles by version, which is why every record and event carries one.
 
+
+### Inbound: an external publisher's events
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Ext as External publisher
+    participant P as Persistence API
+    participant DB as Postgres (persist)
+    participant Proc as Inbound processor (in the API process)
+    participant R as Redis
+    Ext->>P: POST /v1/inbound/clearing (their envelope, their signature)
+    P->>P: verify signature, parse JSON
+    P->>DB: INSERT inbound_messages (pending); COMMIT
+    P-->>Ext: 202 Accepted {message_id}
+    Proc->>DB: lock source FOR UPDATE SKIP LOCKED; next pending message in id order
+    Proc->>Proc: map envelope -> typed events; dedupe on external id
+    Proc->>DB: upsert objects / record receipts; message done; COMMIT
+    Proc->>R: send_task("pubsub.publish_event") per change
+    Note over Proc: transient error: next_attempt_at = now + backoff<br/>too many: status = failed, move on
+    Note over Proc,Ext: optional pull: every interval GET the feed with the stored cursor,<br/>enqueue the page as a message with origin = pull
+```
+
 ### Delivery retry
 
 ```mermaid
@@ -270,6 +293,7 @@ A transaction is a single HTTP request carrying an ordered list of insert, updat
 | Event ordering | Events for one object are produced in version order. Delivery order to a subscriber is **not** guaranteed under retries or parallel workers; consumers must use `version` to discard stale updates. |
 | Delivery | At-least-once per matching subscriber. A subscriber with several matching subscriptions receives one webhook listing all matching subscription ids. Fan-out is idempotent per `(event_id, subscriber_id)` (unique index), so a `publish_event` message redelivered after a worker crash (Celery acks late) re-attempts the delivery rows it already created instead of inserting new ones; a duplicate webhook is still possible when the crash happened after the POST but before the row was marked delivered, so receivers should treat `event_id` as an idempotency key. |
 | Delivery durability | Every delivery is a database row before the first POST; failed deliveries remain replayable for `DELIVERY_RETENTION_DAYS`. |
+| Inbound durability | An external message is stored before it is acknowledged (202); it is processed one at a time per source in arrival order, retried with backoff on transient failure, quarantined as `failed` after `INBOUND_MAX_ATTEMPTS`, and deduplicated on the sender's event id. If the store is down the sender receives 503 and is expected to retry. |
 | Authentication | Static API key on every API call; HMAC-SHA256 over timestamp and body on every webhook, with a 5-minute replay window. |
 | Read consistency | Queries read committed data from the primary; there are no replicas in the design. |
 
@@ -371,6 +395,8 @@ A load probe run inside the Docker network on a developer laptop, with one worke
 | One webhook per subscriber per event | One per subscription | Avoids duplicate processing in the receiver; the payload lists all matching subscription ids. |
 | HMAC-signed webhooks | mTLS; bearer tokens in the URL | Works with any receiver, no certificate management, replay-bounded by timestamp. |
 | Shared static API key | OAuth2 / JWT | Service-to-service deployment behind a gateway; keeps the surface small. Swappable in one dependency. |
+| Inbound queue in Postgres, processed by the API process | Celery task per inbound message; process synchronously | The sender is acknowledged once the row is committed, independent of processing; per-source ordering comes from one row lock; no new runtime component. A dedicated processor instance is a flag away (`INBOUND_PROCESSOR_ENABLED`). |
+| Pull as an optional complement to push | Push only | Publishers stop pushing, miss deliveries or offer backfill feeds; pulling the same feed into the same queue with the same dedupe covers all three. |
 | Sync SQLAlchemy in workers, async in APIs | Async everywhere | Celery prefork and asyncio do not mix; the two engines share the ORM models. |
 | JSON filter DSL instead of a text grammar | SQL fragments; a custom parser | Validated by Pydantic, safe to store and execute, trivially translatable to SQL and to in-memory checks. |
 

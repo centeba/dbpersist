@@ -13,6 +13,7 @@ import httpx
 from pydantic import ValidationError
 
 from dbpersist_common.filters import dump_filter, parse_filter
+from dbpersist_common.inbound import InboundAuth, InboundMapping, InboundPull
 from dbpersist_sdk.exceptions import (
     DBPersistError,
     DuplicateKey,
@@ -409,3 +410,76 @@ class DBPersistClient:
             raise DBPersistError(
                 "not registered: call register_subscriber() or use_subscriber() first"
             )
+
+    # ---- inbound sources (external senders -> dbpersist) ---------------------------------
+
+    async def create_inbound_source(
+        self,
+        name: str,
+        mapping: InboundMapping | dict[str, Any],
+        auth: InboundAuth | dict[str, Any],
+        *,
+        mode: Literal["upsert", "publish"] = "upsert",
+        update_mode: UpdateMode = "merge",
+        auto_register_types: bool = False,
+        processing: Literal["queue", "sync"] = "queue",
+        pull: InboundPull | dict[str, Any] | None = None,
+        description: str = "",
+        enabled: bool = True,
+    ) -> dict[str, Any]:
+        """Register an external sender. Returns the source as the API shows it (secret masked).
+
+        Point the sender at ``<persist_url>/v1/inbound/<name>``; that endpoint is authenticated
+        by ``auth``, not by the dbpersist API key.
+        """
+        m = (
+            mapping
+            if isinstance(mapping, InboundMapping)
+            else InboundMapping.model_validate(mapping)
+        )
+        a = auth if isinstance(auth, InboundAuth) else InboundAuth.model_validate(auth)
+        r = await self._p.post(
+            "/inbound-sources",
+            json={
+                "name": name,
+                "description": description,
+                "enabled": enabled,
+                "mode": mode,
+                "update_mode": update_mode,
+                "auto_register_types": auto_register_types,
+                "processing": processing,
+                "auth": a.model_dump(),
+                "mapping": m.model_dump(exclude_none=True),
+                "pull": (
+                    None
+                    if pull is None
+                    else (
+                        pull if isinstance(pull, InboundPull) else InboundPull.model_validate(pull)
+                    ).model_dump()
+                ),
+            },
+        )
+        _raise_for(r)
+        return r.json()
+
+    async def test_inbound_source(
+        self, name: str, payload: Any, headers: dict[str, str] | None = None
+    ) -> dict[str, Any]:
+        """Dry run a sample payload (and optionally sample headers) against a source's mapping."""
+        r = await self._p.post(
+            f"/inbound-sources/{name}/test", json={"payload": payload, "headers": headers or {}}
+        )
+        _raise_for(r)
+        return r.json()
+
+    async def list_inbound_sources(self) -> list[dict[str, Any]]:
+        r = await self._p.get("/inbound-sources")
+        _raise_for(r)
+        return r.json()
+
+    async def delete_inbound_source(self, name: str) -> None:
+        r = await self._p.delete(f"/inbound-sources/{name}")
+        _raise_for(r)
+
+    def inbound_url(self, name: str) -> str:
+        return f"{self._p.base_url}/inbound/{name}"

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -14,7 +15,7 @@ from dbpersist_common.telemetry import (
 )
 from dbpersist_persistence.celery_app import make_producer
 from dbpersist_persistence.db import make_engine, make_sessionmaker
-from dbpersist_persistence.routers import objects, publish, transactions, types
+from dbpersist_persistence.routers import inbound, objects, publish, transactions, types
 from dbpersist_persistence.services.errors import (
     DuplicateKey,
     InvalidData,
@@ -22,6 +23,7 @@ from dbpersist_persistence.services.errors import (
     VersionConflict,
 )
 from dbpersist_persistence.services.events import CeleryEventPublisher, EventPublisher
+from dbpersist_persistence.services.inbound_queue import run_processor
 from dbpersist_persistence.settings import Settings
 
 log = logging.getLogger(__name__)
@@ -45,14 +47,34 @@ def create_app(
         log.info(
             "persistence started", extra={"database": settings.persist_database_url.split("@")[-1]}
         )
-        yield
-        await engine.dispose()
+        processor: asyncio.Task[None] | None = None
+        if settings.inbound_processor_enabled:
+            processor = asyncio.create_task(
+                run_processor(app.state.sessionmaker, settings, app.state.publisher)
+            )
+        try:
+            yield
+        finally:
+            if processor is not None:
+                processor.cancel()
+                try:
+                    await processor
+                except asyncio.CancelledError:
+                    pass
+            await engine.dispose()
 
     app = FastAPI(title="dbpersist persistence", version="0.1.0", lifespan=lifespan)
     app.state.settings = settings
     app.state.publisher = publisher or CeleryEventPublisher(make_producer(settings.redis_url))
 
-    for r in (types.router, objects.router, transactions.router, publish.router):
+    for r in (
+        types.router,
+        objects.router,
+        transactions.router,
+        publish.router,
+        inbound.ingress,
+        inbound.manage,
+    ):
         app.include_router(r, prefix="/v1")
     instrument_fastapi(app)
 

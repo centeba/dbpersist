@@ -67,9 +67,19 @@ Every test registers fresh object types and subscribers with unique names, so th
 | S11 | Publish-only reaches subscribers | Subscribe to `qty = 42`; publish an update without persisting | The update is delivered with `changed_fields` and no object id; the count stays 0 |
 | S12 | Active select | Insert; call `active_select` with a matching filter; insert another match | The initial select returns the existing row and the later insert is delivered |
 
+## Inbound scenarios (`tests/integration/test_inbound_scenarios.py`)
+
+| ID | Scenario | Steps | Expected |
+|---|---|---|---|
+| I1 | External events through the queue | Register a source (shared-secret auth, batched envelope mapping, auto-registered type); subscribe to the type; POST an `account.opened` event; POST it again; POST an update and a close in one batch | Each POST is answered 202; the first produces an `on_insert` with the envelope stored under `_source`; the redelivery is processed as a duplicate and produces no webhook; the batch produces an `on_update` with `changed_fields == ["status"]` and an `on_delete` |
+| I2 | Signed publish-only source | Register a source with HMAC-SHA256 over `timestamp.body`, mode publish, synchronous; POST with a bad and a good signature | 401 then 200; the subscriber receives the update with no object id and nothing is stored |
+| I3 | Dry run and management | Create a source, dry-run a two-event payload, list sources, delete | One mapped event and one problem reported, the unknown local type named, source visible in the list |
+
 ## What the unit layer already covers
 
 - `packages/common/tests`: filter DSL validation, the in-memory evaluator table, compiled SQL for every operator, and a parity test that the SQL and the evaluator agree on the same fixture data.
+- `packages/common/tests/test_inbound.py`: the extract language, batch and single-event mapping, every authentication mode including HMAC variants and dbpersist chaining.
+- `packages/persistence/tests/test_inbound.py`: source CRUD with secret masking, ingress authentication and unknown/disabled sources, the synchronous upsert lifecycle (auto-registered type, rejects, duplicates, merge with changed fields, unchanged skip, delete), publish mode with HMAC, dry run, queue mode ordering and 202, transient-failure retry with order preserved, quarantine after max attempts and operator retry, pull with cursor and interval, pull failure recording.
 - `packages/persistence/tests`: all CRUD routes, schema validation, version conflicts, replace and merge semantics with `changed_fields`, filter parity against Postgres, cursor and offset paging, transaction atomicity, publish-only, reference expansion, API key enforcement.
 - `packages/pubsub/tests`: subscriber and subscription APIs, matching and per-subscriber dedupe, signed webhook delivery, retry bookkeeping, terminal failure and replay, idle cleanup and delivery pruning, stats counters, admin endpoints.
 - `packages/sdk/tests`: request shapes, cursor following, error mapping, nested transactions, subscribe-before-select ordering, signature verification and callback dispatch in the receiver.

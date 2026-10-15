@@ -1,3 +1,4 @@
+from dbpersist_common.inbound import InboundAuth, InboundMapping
 from dbpersist_sdk.client import DBPersistClient, Transaction
 from dbpersist_sdk.exceptions import (
     DBPersistError,
@@ -27,6 +28,8 @@ __all__ = [
     "DBPersistError",
     "DeliveryError",
     "DuplicateKey",
+    "InboundAuth",
+    "InboundMapping",
     "InvalidData",
     "NotFound",
     "ObjectRecord",

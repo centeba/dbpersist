@@ -21,7 +21,9 @@ HEADERS = {"X-API-Key": API_KEY}
 
 @pytest.fixture(scope="session")
 def settings() -> Settings:
-    return Settings(persist_database_url=TEST_DB_URL, api_key=API_KEY)
+    return Settings(
+        persist_database_url=TEST_DB_URL, api_key=API_KEY, inbound_processor_enabled=False
+    )
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -44,7 +46,12 @@ async def client(settings: Settings, publisher: RecordingPublisher) -> AsyncIter
     app = create_app(settings, publisher=publisher)
     async with app.router.lifespan_context(app):
         async with app.state.engine.begin() as conn:
-            await conn.execute(text("TRUNCATE objects, object_types CASCADE"))
+            await conn.execute(
+                text(
+                    "TRUNCATE inbound_receipts, inbound_messages, inbound_sources, objects, "
+                    "object_types CASCADE"
+                )
+            )
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test", headers=HEADERS
         ) as c:

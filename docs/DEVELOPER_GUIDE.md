@@ -19,6 +19,7 @@ Contents
 13. [Common tasks](#13-common-tasks)
 14. [Troubleshooting](#14-troubleshooting)
 15. [Performance](#15-performance)
+16. [Inbound sources](#16-inbound-sources)
 
 ## 1. Architecture
 
@@ -219,6 +220,10 @@ All settings are environment variables (or `.env`), read by pydantic-settings; n
 | `DEPLOYMENT_ENVIRONMENT` | `development` | all | resource attribute |
 | `LOG_LEVEL` | `INFO` | all | root log level |
 | `LOG_FORMAT` | `json` | all | `json` or `text` |
+| `INBOUND_PROCESSOR_ENABLED` | `true` | persistence | run the inbound queue processor in this process |
+| `INBOUND_TICK_SECONDS` | `1.0` | persistence | idle poll interval of the processor |
+| `INBOUND_MAX_ATTEMPTS` | `10` | persistence | transient failures before a message is marked failed |
+| `INBOUND_BACKOFF_MAX_SECONDS` | `300` | persistence | cap of the retry backoff |
 
 ## 10. Database migrations
 
@@ -323,3 +328,91 @@ docker run --rm --network dbpersist_default --name bench -v "$PWD/scripts/bench_
 ```
 
 `N`, `C` and `FILTER_SUBS` are environment variables. For the drain rate, `docker compose stop pubsub-worker`, start the bench with `-e WAIT=120`, and `docker compose start pubsub-worker` once it prints `accepted`.
+
+## 16. Inbound sources
+
+Inbound sources let outside systems feed dbpersist: an external publisher POSTs its own event
+notifications to `POST /v1/inbound/{source}` and they become ordinary dbpersist objects and
+events, so every subscriber, query and webhook works on them unchanged. One source describes
+one sender: how to authenticate it, how to map its envelope, and optionally how to poll it.
+
+### Fault tolerance: the durable queue
+
+The ingress does as little as possible: authenticate (401 on failure), parse the JSON (400),
+store the raw body as an `inbound_messages` row and answer **202 Accepted** with the message
+id. If Postgres is unreachable the sender gets **503** so it retries. Processing happens in a
+background loop inside the persistence API process (`services/inbound_queue.py`,
+`INBOUND_PROCESSOR_ENABLED`, every `INBOUND_TICK_SECONDS`):
+
+- messages of one source are processed **one at a time in arrival order**; a `FOR UPDATE SKIP
+  LOCKED` lock on the source row keeps it to one processor even with several API workers;
+- each message runs in its own transaction; transient failures (database or network errors)
+  re-schedule it with exponential backoff up to `INBOUND_MAX_ATTEMPTS`, and the source waits so
+  order is kept; a message that still fails is marked `failed` and the queue moves on, so one
+  poison message cannot block a source for ever;
+- `POST /inbound-sources/{name}/messages/retry` puts failed messages back on the queue;
+- the outcome of every message (per-event accepted / duplicate / unchanged / rejected) is kept
+  in `result` and listed by `GET /inbound-sources/{name}/messages?status=`.
+
+A source with `processing: sync` applies the message before answering (200 with the outcome);
+use it only when the sender needs the result in the response.
+
+### When the publisher stops pushing: pull
+
+A source may carry a `pull` block: a URL (plus headers, query parameters or a JSON body), an
+interval, a cursor parameter and an expression that finds the next cursor in the response. The
+processor fetches a page whenever the interval has elapsed, stores the next cursor on the
+source, and enqueues the page as a message with `origin: pull`. `POST /inbound-sources/{name}/pull`
+fetches a page immediately. Because dedupe uses the sender's event id, overlapping push and
+pull deliveries collapse to one application.
+
+### Mapping
+
+`common/inbound.py` holds the mapping model; `common/extract.py` the expression language
+(`a.b[0].c` paths, `{a}-{b}` templates, `const:` literals). A mapping names: `events_path` for
+batched envelopes; `type` plus `type_map` / `default_type`; `key` (local key field to
+expression, copied into the document) or none to derive the key from the document; `op` with
+`op_map` / `default_op`; `data` for the payload; `external_id` for dedupe; `occurred_at`;
+`changed_fields`; `envelope_field` to keep the envelope under one attribute of the document.
+`POST /inbound-sources/{name}/test` dry-runs a sample payload and sample headers.
+
+Modes: `upsert` stores the object (insert, merge or replace update, soft delete; unchanged
+updates are skipped) and the normal change events follow; `publish` emits events only.
+`auto_register_types` creates an unknown local type from the mapping's key fields.
+
+Authentication modes (`InboundAuth`): `header_secret`, `bearer`, `basic`, `hmac_sha256` with a
+configurable header, signed payload template, prefix, encoding and timestamp tolerance, and
+`dbpersist`, which accepts dbpersist's own webhook signature so one deployment can feed
+another. The secret is stored with the source and masked in every response.
+
+### Example: a CloudEvents-style publisher
+
+```json
+{
+  "name": "clearing",
+  "mode": "upsert",
+  "auto_register_types": true,
+  "auth": {"mode": "hmac_sha256", "secret": "<from the publisher>", "header": "X-Signature",
+           "signature_prefix": "sha256=", "timestamp_header": "X-Timestamp",
+           "signed_payload": "{timestamp}.{body}"},
+  "mapping": {
+    "events_path": "events",
+    "type": "type",
+    "type_map": {"account.opened": "ClearingAccount", "account.updated": "ClearingAccount",
+                 "account.closed": "ClearingAccount", "order.filled": "ClearingOrder"},
+    "key": {"account_id": "data.accountId"},
+    "op": "type",
+    "op_map": {"account.opened": "insert", "account.closed": "delete"},
+    "data": "data",
+    "external_id": "id",
+    "occurred_at": "time",
+    "envelope_field": "_envelope"
+  },
+  "pull": {"url": "https://publisher.example/v1/events", "headers": {"Authorization": "Bearer ..."},
+           "interval_seconds": 60, "cursor_param": "after", "cursor_path": "next_cursor"}
+}
+```
+
+Field names above are illustrative. For a specific publisher, take the envelope, signature
+scheme and feed endpoint from its documentation and check the mapping with the dry-run endpoint
+before enabling the source.

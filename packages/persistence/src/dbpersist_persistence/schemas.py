@@ -5,6 +5,13 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from dbpersist_common.events import EventOp
+from dbpersist_common.inbound import (
+    InboundAuth,
+    InboundMapping,
+    InboundPull,
+    MappedEvent,
+    MappingProblem,
+)
 
 
 class ObjectTypeIn(BaseModel):
@@ -137,3 +144,128 @@ class PublishIn(BaseModel):
 class PublishOut(BaseModel):
     event_id: uuid.UUID
     key: str
+
+
+# ---- inbound sources -------------------------------------------------------------------------
+
+
+class InboundSourceIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(pattern=r"^[A-Za-z0-9_.-]+$", max_length=100)
+    description: str = ""
+    enabled: bool = True
+    mode: Literal["upsert", "publish"] = "upsert"
+    update_mode: Literal["merge", "replace"] = "merge"
+    auto_register_types: bool = False
+    processing: Literal["queue", "sync"] = "queue"
+    auth: InboundAuth
+    mapping: InboundMapping
+    pull: InboundPull | None = None
+
+
+class InboundSourceOut(BaseModel):
+    """Source as shown to operators: the auth secret is masked."""
+
+    name: str
+    description: str
+    enabled: bool
+    mode: str
+    update_mode: str
+    auto_register_types: bool
+    processing: str
+    auth: dict[str, Any]
+    mapping: InboundMapping
+    pull: InboundPull | None
+    pull_cursor: str | None
+    last_pulled_at: datetime | None
+    last_pull_error: str | None
+    ingest_path: str
+    queue: dict[str, int]
+    received_count: int
+    accepted_count: int
+    duplicate_count: int
+    rejected_count: int
+    last_received_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class IngestedEvent(BaseModel):
+    index: int
+    type_name: str
+    key: str
+    op: EventOp
+    event_id: uuid.UUID | None = None
+    status: Literal["accepted", "duplicate", "unchanged", "rejected"]
+    reason: str | None = None
+
+
+class IngestOut(BaseModel):
+    source: str
+    received: int
+    accepted: int
+    duplicates: int
+    rejected: int
+    events: list[IngestedEvent]
+
+
+class InboundTestIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    payload: Any
+    headers: dict[str, str] = Field(default_factory=dict)
+    body: str | None = Field(
+        default=None,
+        description="exact request body for signature checks; defaults to the JSON of payload",
+    )
+
+
+class InboundTestOut(BaseModel):
+    auth_ok: bool | None
+    auth_error: str | None
+    events: list[MappedEvent]
+    problems: list[MappingProblem]
+    unknown_types: list[str]
+
+
+class InboundReceiptOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    external_id: str
+    type_name: str
+    key: str
+    op: str
+    event_id: uuid.UUID | None
+    received_at: datetime
+
+
+class EnqueuedOut(BaseModel):
+    source: str
+    message_id: int
+    queued: bool = True
+
+
+class InboundMessageOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    origin: str
+    status: str
+    attempts: int
+    next_attempt_at: datetime
+    last_error: str | None
+    result: dict[str, Any] | None
+    received_at: datetime
+    processed_at: datetime | None
+
+
+class RetryOut(BaseModel):
+    requeued: int
+
+
+class PullOut(BaseModel):
+    pulled: bool
+    pull_cursor: str | None
+    last_pull_error: str | None

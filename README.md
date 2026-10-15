@@ -107,6 +107,8 @@ All endpoints take `X-API-Key` (default `dev-api-key`; set `API_KEY`). Full deta
 | `POST /objects/{type}/count` `{filter}` | count |
 | `POST /transactions` `{ops: [...]}` | atomic batch of insert / update / delete |
 | `POST /publish` | emit an event without persisting |
+| `POST /inbound/{source}` | ingress for an external publisher, authenticated by the source's own scheme; stores the message and answers 202 |
+| `POST/GET/PUT/DELETE /inbound-sources[/{name}]` | manage inbound sources (auth, mapping, pull); `POST .../test` dry-runs a payload; `GET .../messages`, `POST .../messages/retry`, `POST .../pull`, `GET .../receipts` |
 | `GET /health`, `GET /healthz` | liveness, readiness (database) |
 
 Version mismatches return `409 {"code": "version_conflict", "current_version": n}`.
@@ -126,6 +128,10 @@ Version mismatches return `409 {"code": "version_conflict", "current_version": n
 | `GET /health`, `GET /healthz` | liveness, readiness (database and broker) |
 
 Webhook requests carry `X-DBPersist-Signature: sha256=HMAC(secret, "<timestamp>.<body>")`, `X-DBPersist-Timestamp` (5-minute window) and `X-DBPersist-Event-Id`. The body is `{"event": {...}, "subscription_ids": [...], "delivery_id": n}`. Failed deliveries retry with exponential backoff up to 8 times, are then marked `failed`, and can be replayed.
+
+## Inbound sources
+
+Events from outside systems can be brought in as well: register an **inbound source** with the sender's authentication (shared secret, bearer, basic, HMAC with configurable header and signed payload, or dbpersist's own scheme) and a mapping from its envelope to local types, keys, operations and payload, then point the sender at `POST /v1/inbound/{source}`. Messages are stored before they are acknowledged, processed one at a time per source in arrival order with retries and quarantine, deduplicated on the sender's event id, and can also be **pulled** from the publisher's feed on an interval with a stored cursor. Details in the [developer guide](docs/DEVELOPER_GUIDE.md#16-inbound-sources).
 
 ## Filter DSL
 
