@@ -242,7 +242,9 @@ async def events() -> StreamingResponse:
         finally:
             desk.listeners.discard(q)
 
-    return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+    return StreamingResponse(
+        gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"}
+    )
 
 
 # ---- pub/sub admin, proxied so the browser never holds the API key -----------------------
@@ -312,11 +314,21 @@ async def action_fill(body: FillIn) -> dict:
             status = "filled" if filled == rec.data["qty"] else "partial"
             try:
                 new = await c.update(
-                    ORDER, rec.id, rec.version,
-                    {"filled": filled, "status": status, "notes": [*rec.data.get("notes", []), f"fill {body.qty}"]},
+                    ORDER,
+                    rec.id,
+                    rec.version,
+                    {
+                        "filled": filled,
+                        "status": status,
+                        "notes": [*rec.data.get("notes", []), f"fill {body.qty}"],
+                    },
                     mode="merge",
                 )
-                return {"version": new.version, "status": new.data["status"], "filled": new.data["filled"]}
+                return {
+                    "version": new.version,
+                    "status": new.data["status"],
+                    "filled": new.data["filled"],
+                }
             except VersionConflict:
                 continue
     raise HTTPException(409, "too many concurrent updates; try again")

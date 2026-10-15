@@ -79,13 +79,21 @@ async def fill(client: DBPersistClient, order_id: str, qty: int) -> None:
                 ORDER,
                 rec.id,
                 rec.version,
-                {"filled": filled, "status": status, "notes": [*rec.data.get("notes", []), f"fill {qty}"]},
+                {
+                    "filled": filled,
+                    "status": status,
+                    "notes": [*rec.data.get("notes", []), f"fill {qty}"],
+                },
                 mode="merge",
             )
         except VersionConflict as exc:
-            print(f"version conflict (someone else changed it, now v{exc.current_version}); retrying")
+            print(
+                f"version conflict (someone else changed it, now v{exc.current_version}); retrying"
+            )
             continue
-        print(f"{order_id}: filled {new.data['filled']}/{new.data['qty']} -> {new.data['status']} (v{new.version})")
+        print(
+            f"{order_id}: filled {new.data['filled']}/{new.data['qty']} -> {new.data['status']} (v{new.version})"
+        )
         return
     sys.exit("gave up after 5 conflicts")
 
@@ -98,7 +106,9 @@ async def cancel(client: DBPersistClient, order_id: str) -> None:
     print(f"{order_id}: cancelled (v{new.version})")
 
 
-async def list_orders(client: DBPersistClient, status: str | None, symbol: str | None, customer: str | None) -> None:
+async def list_orders(
+    client: DBPersistClient, status: str | None, symbol: str | None, customer: str | None
+) -> None:
     clauses: list[dict] = []
     if status:
         clauses.append({"field": "status", "op": "eq", "value": status})
@@ -112,7 +122,9 @@ async def list_orders(client: DBPersistClient, status: str | None, symbol: str |
     total = await client.count(ORDER, flt)
     for r in rows:
         d = r.data
-        print(f"{r.key}  {d['side']:4} {d['qty']:>5} {d['symbol']:<5} filled={d.get('filled', 0):<5} {d['status']:<9} v{r.version}")
+        print(
+            f"{r.key}  {d['side']:4} {d['qty']:>5} {d['symbol']:<5} filled={d.get('filled', 0):<5} {d['status']:<9} v{r.version}"
+        )
     print(f"{len(rows)} shown of {total}")
 
 
@@ -132,14 +144,24 @@ async def history(client: DBPersistClient, order_id: str) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
-    p = argparse.ArgumentParser(prog="orderdesk", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        prog="orderdesk", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     sub = p.add_subparsers(dest="cmd", required=True)
-    s = sub.add_parser("seed"); s.add_argument("--orders", type=int, default=8)
-    s = sub.add_parser("fill"); s.add_argument("order"); s.add_argument("qty", type=int)
-    s = sub.add_parser("cancel"); s.add_argument("order")
-    s = sub.add_parser("list"); s.add_argument("--status"); s.add_argument("--symbol"); s.add_argument("--customer")
+    s = sub.add_parser("seed")
+    s.add_argument("--orders", type=int, default=8)
+    s = sub.add_parser("fill")
+    s.add_argument("order")
+    s.add_argument("qty", type=int)
+    s = sub.add_parser("cancel")
+    s.add_argument("order")
+    s = sub.add_parser("list")
+    s.add_argument("--status")
+    s.add_argument("--symbol")
+    s.add_argument("--customer")
     sub.add_parser("stream")
-    s = sub.add_parser("history"); s.add_argument("order")
+    s = sub.add_parser("history")
+    s.add_argument("order")
     a = p.parse_args(argv)
 
     async def run() -> None:
