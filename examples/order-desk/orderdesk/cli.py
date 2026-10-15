@@ -68,7 +68,7 @@ async def seed(client: DBPersistClient, n_orders: int) -> None:
 
 async def fill(client: DBPersistClient, order_id: str, qty: int) -> None:
     """Apply a fill. Concurrent fills on the same order are serialised by the version check."""
-    for attempt in range(5):
+    for _ in range(5):
         rec = await client.get_by_key(ORDER, order_id)
         filled = rec.data.get("filled", 0) + qty
         if filled > rec.data["qty"]:
@@ -92,7 +92,8 @@ async def fill(client: DBPersistClient, order_id: str, qty: int) -> None:
             )
             continue
         print(
-            f"{order_id}: filled {new.data['filled']}/{new.data['qty']} -> {new.data['status']} (v{new.version})"
+            f"{order_id}: filled {new.data['filled']}/{new.data['qty']} "
+            f"-> {new.data['status']} (v{new.version})"
         )
         return
     sys.exit("gave up after 5 conflicts")
@@ -123,7 +124,8 @@ async def list_orders(
     for r in rows:
         d = r.data
         print(
-            f"{r.key}  {d['side']:4} {d['qty']:>5} {d['symbol']:<5} filled={d.get('filled', 0):<5} {d['status']:<9} v{r.version}"
+            f"{r.key}  {d['side']:4} {d['qty']:>5} {d['symbol']:<5} "
+            f"filled={d.get('filled', 0):<5} {d['status']:<9} v{r.version}"
         )
     print(f"{len(rows)} shown of {total}")
 

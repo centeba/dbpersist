@@ -168,18 +168,21 @@ async def status(cfg: dict[str, Any]) -> None:
         msgs = (await a.get(f"/inbound-sources/{cfg['name']}/messages?limit=5")).json()
     print(
         f"{src['name']}: queue={src['queue']} received={src['received_count']} "
-        f"accepted={src['accepted_count']} duplicates={src['duplicate_count']} rejected={src['rejected_count']}"
+        f"accepted={src['accepted_count']} duplicates={src['duplicate_count']} "
+        f"rejected={src['rejected_count']}"
     )
     if src.get("pull"):
         print(
-            f"  pull: cursor={src['pull_cursor']} last={src['last_pulled_at']} error={src['last_pull_error']}"
+            f"  pull: cursor={src['pull_cursor']} last={src['last_pulled_at']} "
+            f"error={src['last_pull_error']}"
         )
     for m in msgs:
         summary = m["result"] and {
             k: m["result"][k] for k in ("accepted", "duplicates", "rejected")
         }
         print(
-            f"  message {m['id']} {m['origin']} {m['status']} attempts={m['attempts']} {summary or m['last_error'] or ''}"
+            f"  message {m['id']} {m['origin']} {m['status']} attempts={m['attempts']} "
+            f"{summary or m['last_error'] or ''}"
         )
 
 
