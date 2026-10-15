@@ -1,0 +1,21 @@
+[project]
+name = "dbpersist-sdk"
+version = "0.1.0"
+description = "Async client SDK for dbpersist with insert/update/delete callbacks and a webhook receiver"
+requires-python = ">=3.12"
+dependencies = [
+    "dbpersist-common",
+    "httpx>=0.27",
+    "pydantic>=2.9",
+    "fastapi>=0.115",
+]
+
+[tool.uv.sources]
+dbpersist-common = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dbpersist_sdk"]

@@ -1,0 +1,4 @@
+CREATE DATABASE persist;
+CREATE DATABASE pubsub;
+CREATE DATABASE persist_test;
+CREATE DATABASE pubsub_test;

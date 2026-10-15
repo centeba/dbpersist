@@ -1,0 +1,29 @@
+[project]
+name = "dbpersist-persistence"
+version = "0.1.0"
+description = "Persistence service: typed JSONB objects over Postgres with criteria queries and transactions"
+requires-python = ">=3.12"
+dependencies = [
+    "dbpersist-common",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sqlalchemy[asyncio]>=2.0.35,<2.1",
+    "asyncpg>=0.29",
+    "alembic>=1.13",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.5",
+    "jsonschema>=4.23",
+    "celery[redis]>=5.4",
+    "httpx>=0.27",
+    "opentelemetry-instrumentation-celery>=0.48b0",
+]
+
+[tool.uv.sources]
+dbpersist-common = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dbpersist_persistence"]

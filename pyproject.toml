@@ -1,0 +1,51 @@
+[project]
+name = "dbpersist-workspace"
+version = "0.1.0"
+description = "Typed JSONB persistence service and pub/sub service with webhook delivery"
+requires-python = ">=3.12"
+dependencies = [
+    "dbpersist-common",
+    "dbpersist-persistence",
+    "dbpersist-pubsub",
+    "dbpersist-sdk",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "respx>=0.21",
+    "ruff>=0.6",
+    "pyright>=1.1.380",
+]
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+dbpersist-common = { workspace = true }
+dbpersist-persistence = { workspace = true }
+dbpersist-pubsub = { workspace = true }
+dbpersist-sdk = { workspace = true }
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+addopts = "--import-mode=importlib"
+testpaths = ["packages/common/tests", "packages/persistence/tests", "packages/pubsub/tests", "packages/sdk/tests", "tests/integration"]
+markers = ["integration: scenario tests against live services (skipped when unreachable)"]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["B008"]  # Depends()/Query() in defaults is the FastAPI idiom
+
+[tool.ruff.lint.isort]
+known-first-party = ["dbpersist_common", "dbpersist_persistence", "dbpersist_pubsub", "dbpersist_sdk"]
+
+[tool.pyright]
+pythonVersion = "3.14"
+typeCheckingMode = "standard"

@@ -1,0 +1,77 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: dbpersist
+      POSTGRES_PASSWORD: dbpersist
+      POSTGRES_DB: dbpersist
+    ports:
+      - "5442:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dbpersist"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7
+    ports:
+      - "6389:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  persistence:
+    build: .
+    command: >
+      sh -c "alembic -c packages/persistence/alembic.ini upgrade head &&
+             uvicorn dbpersist_persistence.main:app --host 0.0.0.0 --port 8001 --workers 2"
+    environment: &app_env
+      API_KEY: ${API_KEY:-dev-api-key}
+      PERSIST_DATABASE_URL: postgresql+asyncpg://dbpersist:dbpersist@postgres:5432/persist
+      PUBSUB_DATABASE_URL: postgresql+asyncpg://dbpersist:dbpersist@postgres:5432/pubsub
+      PUBSUB_SYNC_DATABASE_URL: postgresql+psycopg://dbpersist:dbpersist@postgres:5432/pubsub
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8101:8001"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  pubsub-api:
+    build: .
+    command: >
+      sh -c "alembic -c packages/pubsub/alembic.ini upgrade head &&
+             uvicorn dbpersist_pubsub.main:app --host 0.0.0.0 --port 8002 --workers 2"
+    environment: *app_env
+    ports:
+      - "8102:8002"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  pubsub-worker:
+    build: .
+    command: celery -A dbpersist_pubsub.celery_app worker -Q events,deliveries -c 8 --loglevel=info
+    environment: *app_env
+    depends_on:
+      pubsub-api: { condition: service_started }
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  pubsub-beat:
+    build: .
+    command: celery -A dbpersist_pubsub.celery_app beat --loglevel=info
+    environment: *app_env
+    depends_on:
+      pubsub-api: { condition: service_started }
+
+volumes:
+  pgdata:

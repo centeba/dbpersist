@@ -1,0 +1,44 @@
+# Overlay: ship logs, traces and metrics to the observability platform running from the
+# sentinelbuild_observability compose project on the same host.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d --build
+#
+# The platform's network must already exist (start that stack first). Then add the two APIs
+# to its fleet health probe:
+#   OBS_HEALTH_TARGETS={"dbpersist-persistence":"http://persistence:8001","dbpersist-pubsub":"http://pubsub-api:8002"}
+
+x-otel: &otel
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+  DEPLOYMENT_ENVIRONMENT: ${DEPLOYMENT_ENVIRONMENT:-development}
+  LOG_FORMAT: json
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+services:
+  persistence:
+    environment:
+      <<: *otel
+      OTEL_SERVICE_NAME: dbpersist-persistence
+    networks: [default, observability]
+
+  pubsub-api:
+    environment:
+      <<: *otel
+      OTEL_SERVICE_NAME: dbpersist-pubsub
+    networks: [default, observability]
+
+  pubsub-worker:
+    environment:
+      <<: *otel
+      OTEL_SERVICE_NAME: dbpersist-pubsub-worker
+    networks: [default, observability]
+
+  pubsub-beat:
+    environment:
+      <<: *otel
+      OTEL_SERVICE_NAME: dbpersist-pubsub-beat
+    networks: [default, observability]
+
+networks:
+  observability:
+    external: true
+    name: observability_default
