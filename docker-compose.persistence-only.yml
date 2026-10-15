@@ -1,0 +1,10 @@
+# Persistence without pub/sub. Brings up only Postgres and the persistence API, with
+# PUBSUB_ENABLED=false so no change events are produced and Redis is not required.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.persistence-only.yml up -d postgres persistence
+services:
+  persistence:
+    environment:
+      PUBSUB_ENABLED: "false"
+    depends_on: !override
+      postgres: { condition: service_healthy }

@@ -37,6 +37,7 @@ services:
       PUBSUB_DATABASE_URL: postgresql+asyncpg://dbpersist:dbpersist@postgres:5432/pubsub
       PUBSUB_SYNC_DATABASE_URL: postgresql+psycopg://dbpersist:dbpersist@postgres:5432/pubsub
       REDIS_URL: redis://redis:6379/0
+      PUBSUB_ENABLED: ${PUBSUB_ENABLED:-true}
     ports:
       - "8101:8001"
     depends_on:

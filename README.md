@@ -14,7 +14,7 @@ Documentation: [Architecture](docs/ARCHITECTURE.md) · [Developer guide](docs/DE
 ## How it fits together
 
 1. A client registers an **object type** (name, key fields, optional JSON schema) and writes objects through the persistence API. Each object has a derived key, a `version`, and JSONB `data`.
-2. Every committed insert, update or delete is published as an **event** to Redis after the commit.
+2. Every committed insert, update or delete is published as an **event** to Redis after the commit (when pub/sub is enabled, the default).
 3. The pub/sub worker matches each event against **subscriptions** (a filter tree or a list of keys) and POSTs a signed webhook to each matching **subscriber**, retrying with backoff.
 4. The SDK's receiver verifies the signature and calls your callbacks; `active_select` gives you the current rows and every change after them.
 5. Events from **outside systems** enter the same pipeline through an **inbound source**: the external publisher POSTs its own notifications to `/v1/inbound/{source}`, they are queued durably, mapped onto local types and applied as ordinary writes, so steps 2 to 4 happen for them too. Sources can also pull a publisher's feed.
@@ -142,6 +142,12 @@ If you only need the persistence API, set `PUBSUB_ENABLED=false` on the persiste
 
 ```bash
 PUBSUB_ENABLED=false uv run --package dbpersist-persistence uvicorn dbpersist_persistence.main:app --port 8101
+```
+
+With Docker, the `docker-compose.persistence-only.yml` overlay sets the flag and drops the Redis dependency:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.persistence-only.yml up -d postgres persistence
 ```
 
 ## Filter DSL

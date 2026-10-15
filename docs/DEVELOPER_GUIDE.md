@@ -455,7 +455,14 @@ uv run --package dbpersist-persistence alembic -c packages/persistence/alembic.i
 PUBSUB_ENABLED=false uv run --package dbpersist-persistence uvicorn dbpersist_persistence.main:app --port 8101
 ```
 
-In compose, keep the `persistence` and `postgres` services and drop the others; remove the
-`redis` dependency from `persistence` in your override file if you do not want the container at
-all. The SDK works the same, you simply never call `register_subscriber`, `subscribe` or
-`active_select`.
+In compose, the `docker-compose.persistence-only.yml` overlay sets the flag and replaces the
+`persistence` service's dependencies with Postgres alone:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.persistence-only.yml up -d postgres persistence
+```
+
+The base file also forwards `PUBSUB_ENABLED` from your `.env`, so setting it there has the same
+effect on the full stack. The SDK works the same, you simply never call `register_subscriber`,
+`subscribe` or `active_select`. `packages/persistence/tests/test_pubsub_switch.py` is the test
+for this mode.
