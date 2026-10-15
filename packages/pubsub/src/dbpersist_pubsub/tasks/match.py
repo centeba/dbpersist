@@ -4,6 +4,8 @@ import logging
 from typing import Any
 
 import httpx
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 
 from dbpersist_common.events import PUBLISH_TASK_NAME, ObjectEvent
 from dbpersist_pubsub.celery_app import celery_app, settings
@@ -17,24 +19,43 @@ log = logging.getLogger(__name__)
 
 
 def fan_out(raw_event: dict[str, Any]) -> list[int]:
-    """Create pending Delivery rows for every matching subscriber; return their ids."""
+    """Create pending Delivery rows for every matching subscriber; return the ids to deliver.
+
+    Idempotent: (event_id, subscriber_id) is unique, so a redelivered publish_event message
+    (acks_late, worker died mid-task) finds its rows already there and returns the ones that
+    are still undelivered instead of creating duplicates.
+    """
     event = ObjectEvent.model_validate(raw_event)
     # Autocommit: one SELECT for the subscriptions, one multi-row INSERT ... RETURNING.
     with autocommit_sessionmaker()() as session:
         targets = match_event(session, event)
-        rows: list[Delivery] = []
-        for subscriber_id, sub_ids in targets.items():
-            rows.append(
-                Delivery(
-                    event_id=event.event_id,
-                    subscriber_id=subscriber_id,
-                    subscription_ids=sub_ids,
-                    event=event.to_wire(),
+        ids: list[int] = []
+        if targets:
+            wire = event.to_wire()
+            stmt = (
+                insert(Delivery)
+                .values(
+                    [
+                        {
+                            "event_id": event.event_id,
+                            "subscriber_id": subscriber_id,
+                            "subscription_ids": sub_ids,
+                            "event": wire,
+                            "status": "pending",
+                            "attempts": 0,
+                        }
+                        for subscriber_id, sub_ids in targets.items()
+                    ]
                 )
+                .on_conflict_do_nothing(index_elements=["event_id", "subscriber_id"])
+                .returning(Delivery.id)
             )
-        session.add_all(rows)
-        session.commit()
-        ids = [r.id for r in rows]
+            ids = list(session.execute(stmt).scalars())
+            if len(ids) < len(targets):  # redelivery: pick up the rows a previous run left
+                existing = select(Delivery.id).where(
+                    Delivery.event_id == event.event_id, Delivery.status != "delivered"
+                )
+                ids = list(session.execute(existing).scalars())
     get_stats().incr_many({"received": 1, "matched": len(ids)} if ids else {"received": 1})
     log.info(
         "event matched %d subscriber(s)",

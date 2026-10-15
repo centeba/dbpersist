@@ -84,4 +84,7 @@ class Delivery(Base):
     __table_args__ = (
         Index("deliveries_subscriber_created", "subscriber_id", "created_at"),
         Index("deliveries_created", "created_at"),
+        # one delivery per (event, subscriber): makes fan-out idempotent when Celery redelivers
+        # a publish_event message (acks_late) after a worker died mid-task
+        Index("deliveries_event_subscriber", "event_id", "subscriber_id", unique=True),
     )

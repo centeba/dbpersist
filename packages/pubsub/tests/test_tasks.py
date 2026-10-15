@@ -126,3 +126,15 @@ def test_remove_idle_and_prune() -> None:
         session.commit()
         assert prune_old_deliveries(session, retention_days=7, now=now) == 1
         assert session.query(Delivery).count() == 1
+
+
+def test_fan_out_is_idempotent_on_redelivery(sink: WebhookSink) -> None:
+    _make_subscriber()
+    wire = ObjectEvent(type_name="Trade", key="T1", op="insert", version=1, data={}).to_wire()
+    first = fan_out(wire)
+    again = fan_out(wire)  # same message delivered twice by the broker
+    assert first == again
+    with sync_sessionmaker()() as session:
+        assert session.query(Delivery).count() == 1
+    assert attempt_delivery(first[0]) is True
+    assert fan_out(wire) == []  # delivered rows are not handed out again
