@@ -301,6 +301,8 @@ Measured with `scripts/bench_pubsub.py` on Docker Desktop (WSL2, 20 CPUs) agains
 
 End to end with the compose default, same bench (N=4000, C=64): before, intake 205 /s and delivery 90 /s with p50 latency 6.8 s (queue grows); after, delivery keeps pace with intake (~330 /s, bounded by the pubsub API's two uvicorn workers and the bench publisher). A single event stream (C=1): p50 485 ms before, 11 ms after.
 
+Independent check after the change landed, same bench run from a separate session with the **observability overlay enabled** (OTLP export of traces, metrics and logs adds per-task work) and no worker stop/start: N=6000 at C=64 gave 376 /s accepted and **212 /s delivered end to end** (before, same setup: ~90 /s); N=200 at C=1 gave **p50 12 ms** end to end (before: 109 ms). The sustained gain in that configuration is therefore about 2.3x rather than the 3-4x of the backlog-drain figures above, with the rest of the difference attributable to the telemetry overhead and to measuring intake-bound rather than backlog-bound throughput.
+
 What changed and why:
 
 - **Fewer round trips per event.** Before: two Celery hops (publish, then deliver), six Postgres round trips per delivery (BEGIN, two SELECTs, two UPDATEs, COMMIT), a pre-ping per checkout, a new `httpx.Client` (new TCP connection) per POST and three Redis counter commands. After: one Celery hop for the common single-subscriber case, two autocommit statements for fan-out and two for delivery, one keep-alive client per process, two pipelined counter commands. Per-task CPU, not webhook latency, is what bounds a worker on a local network, so this is where the gain comes from.
