@@ -132,7 +132,7 @@ async def list_orders(
 
 async def stream(client: DBPersistClient) -> None:
     n = 0
-    async for r in client.select_iter(ORDER, page_size=100):
+    async for _r in client.select_iter(ORDER, page_size=100):
         n += 1
     print(f"streamed {n} orders through the cursor")
 
