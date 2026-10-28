@@ -71,13 +71,13 @@ Clients talk to dbpersist over HTTP with a static API key. dbpersist talks back 
 
 | Component | Package | Runtime | Responsibility |
 |---|---|---|---|
-| Persistence service | `packages/persistence` | FastAPI on uvicorn, SQLAlchemy 2 async with asyncpg | Object types, versioned JSONB objects, criteria queries, keyset paging, atomic multi-object transactions, publish-only events. Emits one event per committed change. Hosts the **inbound sources**: authenticated ingress for external publishers, a durable per-source message queue with ordered processing and retries, optional polling of a publisher's feed. |
+| Persistence service | `packages/persistence` | FastAPI on uvicorn, SQLAlchemy 2 async with asyncpg | Object types, versioned JSONB objects, criteria queries, keyset paging, atomic multi-object transactions, publish-only events. Emits exactly one event per committed change through a transactional outbox relayed by the API process. Hosts the **inbound sources**: authenticated ingress for external publishers, a durable per-source message queue with ordered processing and retries, optional polling of a publisher's feed. |
 | Pub/sub API | `packages/pubsub` | FastAPI on uvicorn | Subscriber registration and secrets, subscriptions, event ingress from external producers, replay, admin and health endpoints. |
 | Pub/sub workers | `packages/pubsub` | Celery on Redis | Match events to subscriptions, record deliveries, POST signed webhooks with retries, housekeeping (idle subscribers, delivery retention). |
 | SDK | `packages/sdk` | Python library (httpx, FastAPI router) | Typed client for both services, nested transactions, identity cache, callback dispatch from a webhook receiver. |
 | Common | `packages/common` | Python library | Filter DSL with SQL and in-memory evaluators, event model, key derivation, HMAC signing, API-key dependency, logging and OpenTelemetry setup. |
 
-The two services share nothing at the code level except `common`, and nothing at the data level except the Redis queue. Persistence does not import pub/sub; it enqueues a Celery task **by name**. That boundary is what allows the services to be deployed, scaled and restarted independently.
+The two services share nothing at the code level except `common`, and nothing at the data level except the Redis queue. Persistence does not import pub/sub; its outbox relay enqueues a Celery task **by name**. That boundary is what allows the services to be deployed, scaled and restarted independently.
 
 ### Internal structure
 
@@ -85,8 +85,8 @@ The two services share nothing at the code level except `common`, and nothing at
 flowchart TB
     subgraph persistence["Persistence service"]
         PR["routers: types, objects,<br/>transactions, publish"]
-        PS["services: objects, query, events"]
-        PM["models: ObjectType, Object"]
+        PS["services: objects, query,<br/>events, outbox"]
+        PM["models: ObjectType, Object,<br/>OutboxEvent"]
         PR --> PS --> PM
     end
     subgraph pubsub["Pub/sub service"]
@@ -116,6 +116,14 @@ flowchart TB
 ```mermaid
 erDiagram
     OBJECT_TYPES ||--o{ OBJECTS : "type_name"
+    OUTBOX {
+        bigint id PK "assigned at flush, under the object's row lock"
+        jsonb event "the ObjectEvent"
+        timestamptz created_at
+        timestamptz sent_at "null until relayed"
+        int attempts
+        text last_error
+    }
     OBJECT_TYPES {
         text name PK
         text_array key_fields
@@ -134,7 +142,9 @@ erDiagram
     }
 ```
 
-Indexes: a **partial unique index** on `(type_name, key) WHERE deleted_at IS NULL` enforces key uniqueness among live objects and lets a key be reused after deletion; a **GIN index** on `data` (`jsonb_path_ops`) serves equality filters through containment; a B-tree on `(type_name, updated_at, id)` backs keyset paging.
+Indexes: a **partial unique index** on `(type_name, key) WHERE deleted_at IS NULL` enforces key uniqueness among live objects and lets a key be reused after deletion; a **GIN index** on `data` (`jsonb_path_ops`) serves equality filters through containment; a B-tree on `(type_name, updated_at, id)` backs keyset paging; `outbox(sent_at, id)` backs the relay's drain and the retention prune.
+
+`outbox` is the transactional outbox: every write path inserts one row per event in the same transaction as the change, so a row exists exactly when its change is committed. The relay reads unsent rows in id order and stamps `sent_at`; sent rows are kept for `OUTBOX_RETENTION_HOURS` and then pruned.
 
 One table holds every type. Types differ only in their key fields and optional schema; the service validates documents against the schema at write time. The alternative, a table per type, was rejected because it reintroduces DDL on every type registration and splits the query path per type without a performance need at this scale.
 
@@ -208,9 +218,12 @@ sequenceDiagram
 
     App->>P: PATCH /objects/Trade/{id} {version: 2, data: {qty: 160}}
     P->>DB: SELECT ... FOR UPDATE, check version == 2
-    P->>DB: UPDATE data, version = 3, COMMIT
-    P->>R: send_task("pubsub.publish_event", event)
+    P->>DB: UPDATE data, version = 3; INSERT outbox(event); COMMIT
     P-->>App: 200 {version: 3, ...}
+    participant X as Outbox relay (in the API process)
+    X->>DB: SELECT outbox WHERE sent_at IS NULL ORDER BY id FOR UPDATE SKIP LOCKED
+    X->>R: send_task("pubsub.publish_event", event)
+    X->>DB: UPDATE outbox SET sent_at = now(), COMMIT
     R->>W: publish_event(event)
     W->>PDB: SELECT subscriptions WHERE type_name = 'Trade'
     Note over W: evaluate filters in memory,<br/>group matches per subscriber
@@ -223,7 +236,7 @@ sequenceDiagram
     Note over Rcv: verify signature,<br/>call on_update(record, ["qty"])
 ```
 
-The database commit happens **before** the enqueue, and the enqueue happens before the HTTP response. A failure between commit and enqueue leaves a committed write without an event; the API reports this as a 502 so the caller knows, and replay through the pub/sub API is the recovery path. The design accepts this narrow window rather than paying for a transactional outbox at this scale (see §14).
+The event is written to the `outbox` table **in the same transaction** as the change, so the commit either records both or neither, and the HTTP response never waits on Redis. The relay (`services/outbox.py`, started by the API lifespan behind `OUTBOX_RELAY_ENABLED`) holds a transaction-scoped advisory lock so one relay is active at a time across API processes, hands unsent rows to the broker in id order in batches of `OUTBOX_BATCH_SIZE`, and marks each `sent_at`. A broker failure leaves the row unsent with `attempts` and `last_error` recorded and the loop backs off; the next successful tick resumes from the oldest unsent row. Sent rows are pruned after `OUTBOX_RETENTION_HOURS`. Hand-off to the broker is at-least-once (a crash between `send_task` and the marking commit resends that row), which the idempotent fan-out absorbs.
 
 ### Active select
 
@@ -258,8 +271,8 @@ sequenceDiagram
     P-->>Ext: 202 Accepted {message_id}
     Proc->>DB: lock source FOR UPDATE SKIP LOCKED, next pending message in id order
     Proc->>Proc: map envelope -> typed events, dedupe on external id
-    Proc->>DB: upsert objects / record receipts, message done, COMMIT
-    Proc->>R: send_task("pubsub.publish_event") per change
+    Proc->>DB: upsert objects / record receipts / outbox rows, message done, COMMIT
+    Note over Proc,R: the outbox relay sends the events, as for any write
     Note over Proc: transient error: next_attempt_at = now + backoff<br/>too many: status = failed, move on
     Note over Proc,Ext: optional pull: every interval GET the feed with the stored cursor,<br/>enqueue the page as a message with origin = pull
 ```
@@ -280,7 +293,7 @@ Backoff is exponential with jitter and capped (`WEBHOOK_BACKOFF_MAX_SECONDS`). A
 
 ### Transaction
 
-A transaction is a single HTTP request carrying an ordered list of insert, update and delete operations. The service applies them in one database transaction with row locks and version checks, commits once, and only then publishes the events, all stamped with the same `transaction_id`. If any operation fails, nothing is written and nothing is published. The SDK's nested `begin()` blocks are a client-side convenience that collect operations until the outermost block exits.
+A transaction is a single HTTP request carrying an ordered list of insert, update and delete operations. The service applies them in one database transaction with row locks and version checks, stages one outbox row per operation, all stamped with the same `transaction_id`, and commits once. If any operation fails, nothing is written and no event exists. The SDK's nested `begin()` blocks are a client-side convenience that collect operations until the outermost block exits.
 
 ## 6. Guarantees and semantics
 
@@ -289,8 +302,8 @@ A transaction is a single HTTP request carrying an ordered list of insert, updat
 | Write atomicity | Single-object writes and multi-op transactions are atomic in Postgres. |
 | Concurrency control | Optimistic: every update and delete carries the version the caller read; a mismatch is rejected with the current version and nothing changes. |
 | Key uniqueness | Enforced by the database among live objects of a type. |
-| Event emission | At-least-once relative to commits, except the commit-then-enqueue window described in §5, which is surfaced as a 502. With `PUBSUB_ENABLED=false` no events are emitted at all; they are counted and dropped. |
-| Event ordering | Events for one object are produced in version order. Delivery order to a subscriber is **not** guaranteed under retries or parallel workers; consumers must use `version` to discard stale updates. |
+| Event emission | Exactly-once relative to commits: the event row is written in the transaction of the change it describes (§5), so every committed change has exactly one event and a rolled-back change has none, whatever the broker is doing. Hand-off from the outbox to Redis is at-least-once, deduplicated by `event_id` in the fan-out. With `PUBSUB_ENABLED=false` no events are staged at all. |
+| Event ordering | Events for one object are produced in version order: outbox ids are assigned under the object's row lock and a single active relay sends in id order. Delivery order to a subscriber is **not** guaranteed under retries or parallel workers; consumers must use `version` to discard stale updates. |
 | Delivery | At-least-once per matching subscriber. A subscriber with several matching subscriptions receives one webhook listing all matching subscription ids. Fan-out is idempotent per `(event_id, subscriber_id)` (unique index), so a `publish_event` message redelivered after a worker crash (Celery acks late) re-attempts the delivery rows it already created instead of inserting new ones; a duplicate webhook is still possible when the crash happened after the POST but before the row was marked delivered, so receivers should treat `event_id` as an idempotency key. |
 | Delivery durability | Every delivery is a database row before the first POST; failed deliveries remain replayable for `DELIVERY_RETENTION_DAYS`. |
 | Inbound durability | An external message is stored before it is acknowledged (202); it is processed one at a time per source in arrival order, retried with backoff on transient failure, quarantined as `failed` after `INBOUND_MAX_ATTEMPTS`, and deduplicated on the sender's event id. If the store is down the sender receives 503 and is expected to retry. |
@@ -358,7 +371,7 @@ All Python services build from one image (`uv sync --frozen` of the workspace) a
 
 Nothing in the design is Docker-specific: the same four processes run under any orchestrator given a Postgres, a Redis, and the environment variables listed in the developer guide.
 
-**Persistence-only deployments.** Pub/sub is an optional half. With `PUBSUB_ENABLED=false` the persistence service substitutes a null publisher for the Celery producer: committed changes are counted and dropped, Redis is not contacted, and the pub/sub API, worker and beat are not deployed. Everything else, including inbound sources, is unaffected, and the flag can be turned on later without migration.
+**Persistence-only deployments.** Pub/sub is an optional half. With `PUBSUB_ENABLED=false` the persistence service writes no outbox rows and starts no relay: Redis is not contacted, and the pub/sub API, worker and beat are not deployed. Everything else, including inbound sources, is unaffected, and the flag can be turned on later without migration.
 
 ## 11. Scaling and capacity
 
@@ -377,7 +390,7 @@ A load probe run inside the Docker network on a developer laptop, with one worke
 |---|---|---|
 | Postgres (persist) down | Persistence writes and reads fail; `/healthz` reports database down. Pub/sub continues delivering already-queued events. | Restore the database; no data loss for committed writes. |
 | Postgres (pubsub) down | Workers cannot record or update deliveries; tasks fail and Celery retries them; the API cannot register or subscribe. | Restore; queued tasks resume. Events remain in Redis until processed. |
-| Redis down | Persistence writes still commit but the enqueue fails and the API returns 502; workers idle. Not applicable when `PUBSUB_ENABLED=false`: persistence has no Redis dependency and writes return normally. | Restore Redis; replay events for the affected window via `POST /subscribers/{id}/replay` once deliveries exist, or re-publish from the producer. |
+| Redis down | Persistence writes commit and return normally; their events accumulate as unsent `outbox` rows while the relay backs off (`attempts` and `last_error` show the failure); workers idle. Not applicable when `PUBSUB_ENABLED=false`: persistence has no Redis dependency. | Restore Redis; the relay drains the backlog in order on its next tick with no replay needed. |
 | Worker crash mid-task | Celery acknowledges late, so the task is redelivered to another worker. A webhook that was sent but not recorded may be sent twice. | Receivers de-duplicate on `event_id`. |
 | Subscriber endpoint down | Deliveries to that subscriber retry with backoff, then mark `failed`; other subscribers are unaffected. Admin views show pending and failed counts per subscriber. | Fix the endpoint, then replay. |
 | Subscriber silently gone | No heartbeats and no successful deliveries past `IDLE_SUBSCRIBER_MINUTES`. | The beat job removes the subscriber and its subscriptions; deliveries cascade. |
@@ -391,7 +404,7 @@ A load probe run inside the Docker network on a developer laptop, with one worke
 | Single JSONB table with a type registry | Table per type; EAV | No DDL at runtime, one query path, GIN index covers equality; types are many and small. |
 | Optimistic locking by version | Pessimistic row locks held across requests; last-writer-wins | Stateless HTTP cannot hold locks; version checks make conflicts explicit and cheap. |
 | Soft delete | Hard delete | Delete events need the last image; keys must be reusable; retention is a later concern. |
-| Events after commit, enqueued by task name | Transactional outbox; synchronous HTTP to pub/sub | No import coupling, no second hop on the write path, durable queue; the small commit-to-enqueue gap is surfaced as 502. |
+| Transactional outbox in Postgres, relayed by task name | Enqueue after commit (the previous design, with its commit-to-enqueue gap surfaced as 502); synchronous HTTP to pub/sub; Debezium-style log tailing | The event commits with the change, so emission is exactly-once relative to commits and a Redis outage delays events instead of failing writes or losing them; the write path never touches Redis; no import coupling and no new runtime component, since the relay runs in the API process like the inbound processor. |
 | Celery on Redis for fan-out | Direct HTTP from persistence to subscribers; Kafka | Durable retries, backoff and horizontal workers for the price of a Redis; Kafka's ordering and retention were not required. |
 | Subscriptions loaded per event by type | In-memory subscription index with cache invalidation | Simplest correct design across many worker processes; the per-type index keeps the query small. |
 | One webhook per subscriber per event | One per subscription | Avoids duplicate processing in the receiver; the payload lists all matching subscription ids. |
@@ -406,7 +419,7 @@ A load probe run inside the Docker network on a developer laptop, with one worke
 
 ## 14. Known limitations and future work
 
-- **Outbox.** The commit-then-enqueue gap is reported but not self-healing. A transactional outbox table drained by a relay would make event emission exactly-once relative to commits.
+- **Outbox hand-off.** The relay's hand-off to Redis is at-least-once; a resend after a crash is absorbed by the idempotent fan-out but still costs a broker message. A single active relay keeps order; relay throughput is bounded by one process's sequential `send_task` calls.
 - **Ordering.** Per-subscriber ordering under retries would need per-subscriber serialisation (one queue or lock per subscriber) at a throughput cost.
 - **Matching cost.** Filters are parsed per event; caching parsed trees per subscription reduces matching to a few microseconds per subscription. Delivery throughput per worker is bounded by sequential I/O per process; an I/O-concurrent pool or inline delivery for single-subscriber events raises it substantially. Both are in progress.
 - **Authorization.** There is no per-tenant or per-type access control; all callers with the key see all data.

@@ -25,9 +25,9 @@ Contents
 ## 1. Architecture
 
 ```
- client app ──SDK (httpx)──▶ persistence API ──commit──▶ Postgres (persist)
+ client app ──SDK (httpx)──▶ persistence API ──commit: objects + outbox row──▶ Postgres (persist)
       ▲                            │
-      │                            └── after commit: Celery task "pubsub.publish_event" ──▶ Redis
+      │                            └── outbox relay: Celery task "pubsub.publish_event" ──▶ Redis
       │                                                                                     │
       │   signed webhook POST ◀── pubsub worker: match subscriptions, record delivery ◀──────┘
       │                                   │
@@ -37,7 +37,7 @@ Contents
                                             pubsub API: register, subscribe, replay, admin
 ```
 
-- **Persistence** owns object types and versioned JSONB objects. Every committed change becomes an `ObjectEvent`.
+- **Persistence** owns object types and versioned JSONB objects. Every committed change becomes an `ObjectEvent`, written to the `outbox` table in the same transaction and relayed to Redis afterwards.
 - **Pub/sub** owns subscribers and subscriptions. It never touches the persistence database; it only consumes events and pushes webhooks.
 - The two share **Redis** (Celery broker) and the **`common`** package (filter DSL, event model, auth, telemetry). They use separate Postgres databases in one instance.
 - Trace context flows end to end: SDK → persistence (HTTP) → Celery headers → worker → webhook (`traceparent`) → receiver.
@@ -49,7 +49,7 @@ Design decisions worth knowing:
 | One JSONB `objects` table with a type registry, not a table per type | Types are registered at runtime without DDL; one query path and one filter translator cover every type; the GIN index serves equality filters. |
 | `version` column for optimistic locking | Writers send the version they read; a mismatch is a 409 with the current version, never a silent overwrite. |
 | Soft delete (`deleted_at`) | Delete events carry the last document image, and a key can be reused after deletion (partial unique index). |
-| Events enqueued after commit, by task name only | Persistence has no import dependency on pubsub; the Redis queue survives pubsub API downtime. |
+| Transactional outbox, relayed by task name only | An event row commits or rolls back with its change, so emission is exactly-once relative to commits and a Redis outage delays events instead of failing writes; persistence still has no import dependency on pubsub. |
 | Celery tasks use a sync SQLAlchemy engine | Prefork workers and asyncio event loops do not mix; the FastAPI side uses asyncpg. |
 | Per-subscriber dedupe | A subscriber with several matching subscriptions receives one webhook listing all matching subscription ids. |
 | HMAC-signed webhooks with a timestamp | Receivers can authenticate deliveries without TLS client certs; the 5-minute window limits replay. |
@@ -92,14 +92,15 @@ Run the services from source (three terminals) as shown in the README, or everyt
 
 ## 4. Persistence service internals
 
-Request flow for a write: router → `services.objects` → SQLAlchemy session → commit → `services.events.event_for` → `EventPublisher.publish`.
+Request flow for a write: router → `services.objects` → `services.events.event_for` → `services.outbox.stage` (an `outbox` row in the same session) → commit. The relay loop (`services.outbox.run_relay`) later calls `EventPublisher.publish` for each committed row; nothing on the request path talks to Redis.
 
-- **`models.py`**: `ObjectType(name, key_fields, json_schema)` and `Object(id, type_name, key, version, data, deleted_at, created_at, updated_at)` with the partial unique index on live keys, a GIN index on `data`, and a `(type_name, updated_at, id)` index for keyset paging.
+- **`models.py`**: `ObjectType(name, key_fields, json_schema)` and `Object(id, type_name, key, version, data, deleted_at, created_at, updated_at)` with the partial unique index on live keys, a GIN index on `data`, and a `(type_name, updated_at, id)` index for keyset paging. `OutboxEvent(id, event, created_at, sent_at, attempts, last_error)` is the outbox, indexed on `(sent_at, id)` for the drain.
 - **`services/objects.py`**: key derivation (`common.keys.build_key`, key field values joined with the ASCII unit separator), JSON-schema validation, `deep_merge` for merge updates, `changed_fields` (top-level keys whose value differs), row locking with `SELECT ... FOR UPDATE`, version checks, soft delete, `expand` for `x-ref` fields, and `with_retry` for serialization/deadlock errors (SQLSTATE 40001/40P01, three attempts).
 - **`services/query.py`**: builds the SELECT from a `QueryIn`: base predicate (type, not deleted) + `common.filters.to_sqla`, ordering by column or JSONB value (numbers sort numerically), offset paging, or keyset cursor paging on `(updated_at, id)` encoded as base64 JSON. A `next_cursor` is returned only for cursor-style queries that filled the page.
-- **`routers/transactions.py`**: applies a list of insert/update/delete ops in one session and commits once; events for all ops share a `transaction_id` and are published only after commit.
-- **`routers/publish.py`**: builds an event without touching the database (for callers that persist elsewhere).
-- **`services/events.py`**: `EventPublisher` protocol. `CeleryEventPublisher` calls `send_task("pubsub.publish_event")`; `RecordingPublisher` is the test double. Every published event increments the `dbpersist.persistence.events` counter and writes a structured log line.
+- **`routers/transactions.py`**: applies a list of insert/update/delete ops in one session, stages one outbox row per op and commits once; events for all ops share a `transaction_id`, and a failed op rolls back the rows and the events together.
+- **`routers/publish.py`**: builds an event without writing an object (for callers that persist elsewhere). It goes through the outbox like every other event, so the 202 means durably accepted.
+- **`services/events.py`**: `EventPublisher` protocol. `CeleryEventPublisher` calls `send_task("pubsub.publish_event")`; `RecordingPublisher` is the test double; `NullPublisher` is installed when `PUBSUB_ENABLED=false`. Every published event increments the `dbpersist.persistence.events` counter and writes a structured log line.
+- **`services/outbox.py`**: the event hand-off. `stage(session, settings, events)` adds `outbox` rows to the caller's transaction (none when `PUBSUB_ENABLED=false`). `relay_once` takes a transaction-scoped advisory lock so one relay runs at a time across API processes, selects unsent rows in id order with `FOR UPDATE SKIP LOCKED` in batches of `OUTBOX_BATCH_SIZE`, publishes each (in a worker thread, so a blocked broker call never stalls the event loop) and stamps `sent_at`; on a publisher failure the rows already sent are committed as sent, the failing row records `attempts` and `last_error`, and the exception makes `run_relay` back off (doubling up to 30 s). Sent rows older than `OUTBOX_RETENTION_HOURS` are pruned once a minute. Ids are assigned under the changed object's row lock, so one object's events leave in version order. Hand-off to the broker is at-least-once (a crash between `send_task` and the marking commit resends the row); pub/sub fan-out is idempotent per `event_id`, so a resend creates no duplicate deliveries.
 - **Errors**: services raise `NotFound`, `DuplicateKey`, `VersionConflict`, `InvalidData`; `main.py` maps them to 404/409/409/422 with a `code` field the SDK uses.
 
 Adding an endpoint: add the schema to `schemas.py`, the logic to a `services/` module (pure where possible), the route to a router, and a test in `tests/`. Keep routers thin.
@@ -224,6 +225,10 @@ All settings are environment variables (or `.env`), read by pydantic-settings; n
 | `LOG_FORMAT` | `json` | all | `json` or `text` |
 | `INBOUND_PROCESSOR_ENABLED` | `true` | persistence | run the inbound queue processor in this process |
 | `INBOUND_TICK_SECONDS` | `1.0` | persistence | idle poll interval of the processor |
+| `OUTBOX_RELAY_ENABLED` | `true` | persistence | run the outbox relay in this process (needs `PUBSUB_ENABLED=true`; set false on HTTP-only instances, true on at least one) |
+| `OUTBOX_TICK_SECONDS` | `1.0` | persistence | idle poll interval of the relay |
+| `OUTBOX_BATCH_SIZE` | `100` | persistence | unsent rows handed to the broker per relay transaction |
+| `OUTBOX_RETENTION_HOURS` | `24` | persistence | sent outbox rows older than this are pruned |
 | `INBOUND_MAX_ATTEMPTS` | `10` | persistence | transient failures before a message is marked failed |
 | `INBOUND_BACKOFF_MAX_SECONDS` | `300` | persistence | cap of the retry backoff |
 
@@ -248,7 +253,7 @@ Review autogenerated revisions: partial indexes, GIN options and CHECK constrain
 | Smoke | `uv run python scripts/smoke_e2e.py` | the full stack |
 | Everything | `uv run pytest` | |
 
-Conventions: `pytest-asyncio` in auto mode; API tests use `httpx.AsyncClient(transport=ASGITransport(app))`; the persistence tests inject `RecordingPublisher` instead of Celery; pubsub tests run Celery eagerly with `task_eager_propagates=False` so `retry()` re-executes in-process, and replace the webhook client with `httpx.MockTransport` (`dbpersist_pubsub.testing.WebhookSink`). Integration tests create uniquely named types and subscribers, so they can run repeatedly against a shared database. See [TEST_CASES.md](TEST_CASES.md) for the scenario catalogue.
+Conventions: `pytest-asyncio` in auto mode; API tests use `httpx.AsyncClient(transport=ASGITransport(app))`; the persistence tests inject `RecordingPublisher` instead of Celery and run with the relay loop off: the `client` fixture relays the outbox after every response (`conftest.relay`), so `publisher.events` holds exactly the events of the committed changes, and `test_outbox.py` uses a client without that hook to look at the rows themselves; pubsub tests run Celery eagerly with `task_eager_propagates=False` so `retry()` re-executes in-process, and replace the webhook client with `httpx.MockTransport` (`dbpersist_pubsub.testing.WebhookSink`). Integration tests create uniquely named types and subscribers, so they can run repeatedly against a shared database. See [TEST_CASES.md](TEST_CASES.md) for the scenario catalogue.
 
 Lint and types:
 
@@ -348,6 +353,8 @@ background loop inside the persistence API process (`services/inbound_queue.py`,
 
 - messages of one source are processed **one at a time in arrival order**; a `FOR UPDATE SKIP
   LOCKED` lock on the source row keeps it to one processor even with several API workers;
+- the events of a message are staged in the outbox inside the same transaction as its objects
+  and receipts, so they commit or roll back with it;
 - each message runs in its own transaction; transient failures (database or network errors)
   re-schedule it with exponential backoff up to `INBOUND_MAX_ATTEMPTS`, and the source waits so
   order is kept; a message that still fails is marked `failed` and the queue moves on, so one
@@ -434,7 +441,7 @@ registering it. Nothing in dbpersist changes.
 
 ## 17. Running persistence without pub/sub
 
-Pub/sub is optional. Set `PUBSUB_ENABLED=false` on the persistence service and it swaps the
+Pub/sub is optional. Set `PUBSUB_ENABLED=false` on the persistence service and no outbox rows are written, the relay is not started, and it swaps the
 Celery publisher for a `NullPublisher` (`services/events.py`) that counts and drops events;
 no Celery producer is created, Redis is never contacted, and the pub/sub API, worker and beat
 need not exist. Every other feature is unchanged: object types, writes with optimistic locking,

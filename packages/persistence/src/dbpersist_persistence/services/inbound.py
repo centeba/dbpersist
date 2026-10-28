@@ -4,7 +4,7 @@ For each mapped event: resolve the local type (optionally auto-registering it), 
 document and key, deduplicate on the sender's event id, then either upsert the object (mode
 ``upsert``: insert, merge/replace update, or soft delete, each producing the normal change
 event) or emit an event without storing anything (mode ``publish``). All events of one request
-are applied in one transaction; events are published after the commit, like every other write.
+are applied in one transaction; their events are staged in the outbox with it, like every write.
 """
 
 import logging
@@ -179,7 +179,7 @@ async def _apply_one(
 async def ingest(
     session: AsyncSession, source: InboundSource, body: Any
 ) -> tuple[IngestOut, list[ObjectEvent]]:
-    """Map and apply one request body. Caller commits and then publishes the returned events."""
+    """Map and apply one request body. The caller stages the returned events and commits."""
     mapping = InboundMapping.model_validate(source.mapping)
     mapped, problems = map_payload(mapping, body)
     results: list[IngestedEvent] = []

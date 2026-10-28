@@ -18,7 +18,6 @@ from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dbpersist_common.auth import require_api_key
-from dbpersist_common.events import ObjectEvent
 from dbpersist_common.inbound import (
     InboundAuth,
     InboundMapping,
@@ -42,9 +41,10 @@ from dbpersist_persistence.schemas import (
 )
 from dbpersist_persistence.services import inbound_queue as queue
 from dbpersist_persistence.services import objects as svc
+from dbpersist_persistence.services import outbox
 from dbpersist_persistence.services.errors import NotFound
-from dbpersist_persistence.services.events import EventPublisher, get_publisher
 from dbpersist_persistence.services.inbound import ingest
+from dbpersist_persistence.settings import Settings
 
 log = logging.getLogger(__name__)
 
@@ -115,7 +115,7 @@ async def receive(
     name: str,
     request: Request,
     session: AsyncSession = Depends(get_session),
-    publisher: EventPublisher = Depends(get_publisher),
+    settings: Settings = Depends(outbox.get_settings),
 ) -> IngestOut | EnqueuedOut | JSONResponse:
     try:
         source = await session.get(InboundSource, name)
@@ -145,13 +145,13 @@ async def receive(
 
     if source.processing == "sync":
 
-        async def attempt() -> tuple[IngestOut, list[ObjectEvent]]:
+        async def attempt() -> IngestOut:
             out, events = await ingest(session, source, payload)
+            await outbox.stage(session, settings, events)
             await session.commit()
-            return out, events
+            return out
 
-        out, events = await svc.with_retry(attempt)
-        publisher.publish(events)
+        out = await svc.with_retry(attempt)
         log.info(
             "inbound request processed",
             extra={

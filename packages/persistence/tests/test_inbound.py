@@ -13,6 +13,8 @@ from dbpersist_persistence.services import inbound_queue as queue
 from dbpersist_persistence.services.events import RecordingPublisher
 from dbpersist_persistence.settings import Settings
 
+from .conftest import relay
+
 SECRET = "hook-secret"
 ANON = {"X-API-Key": ""}  # the ingress must not need the API key
 H = {**ANON, "X-Hook-Secret": SECRET}
@@ -59,8 +61,12 @@ def settings_fast(settings: Settings) -> Settings:
 
 
 async def _drain(client: AsyncClient, settings: Settings, publisher: RecordingPublisher) -> int:
+    """Process due inbound messages, then relay their events from the outbox to ``publisher``."""
     app = client._transport.app  # type: ignore[attr-defined]
-    return await queue.drain_once(app.state.sessionmaker, settings, publisher)
+    assert app.state.publisher is publisher
+    handled = await queue.drain_once(app.state.sessionmaker, settings)
+    await relay(app)
+    return handled
 
 
 # ---- management ------------------------------------------------------------------------------

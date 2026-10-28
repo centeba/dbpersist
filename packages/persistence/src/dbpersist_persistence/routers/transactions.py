@@ -18,7 +18,9 @@ from dbpersist_persistence.schemas import (
     UpdateOp,
 )
 from dbpersist_persistence.services import objects as svc
-from dbpersist_persistence.services.events import EventPublisher, event_for, get_publisher
+from dbpersist_persistence.services import outbox
+from dbpersist_persistence.services.events import event_for
+from dbpersist_persistence.settings import Settings
 
 router = APIRouter(
     prefix="/transactions", tags=["transactions"], dependencies=[Depends(require_api_key)]
@@ -29,11 +31,11 @@ router = APIRouter(
 async def commit_transaction(
     body: TransactionIn,
     session: AsyncSession = Depends(get_session),
-    publisher: EventPublisher = Depends(get_publisher),
+    settings: Settings = Depends(outbox.get_settings),
 ) -> TransactionOut:
     tx_id = uuid.uuid4()
 
-    async def attempt() -> tuple[list[OpResult], list[ObjectEvent]]:
+    async def attempt() -> list[OpResult]:
         results: list[OpResult] = []
         events: list[ObjectEvent] = []
         for op in body.ops:
@@ -49,9 +51,9 @@ async def commit_transaction(
                 obj = await svc.delete(session, otype, op.id, op.version)
                 events.append(event_for(obj, "delete", transaction_id=tx_id))
             results.append(OpResult(op=op.op, object=ObjectOut.model_validate(obj)))
+        await outbox.stage(session, settings, events)
         await session.commit()
-        return results, events
+        return results
 
-    results, events = await svc.with_retry(attempt)
-    publisher.publish(events)
+    results = await svc.with_retry(attempt)
     return TransactionOut(transaction_id=tx_id, results=results)

@@ -11,6 +11,14 @@ class Settings(CommonSettings):
     # work unchanged, and committed changes simply emit no events.
     pubsub_enabled: bool = True
 
+    # Transactional outbox relay (runs inside the API process; with PUBSUB_ENABLED=false the
+    # outbox is never written and the relay is not started). Set false on instances that should
+    # only serve HTTP, true on at least one.
+    outbox_relay_enabled: bool = True
+    outbox_tick_seconds: float = 1.0
+    outbox_batch_size: int = 100
+    outbox_retention_hours: int = 24
+
     # Inbound queue processor (runs inside the API process; set false on instances that
     # should only serve HTTP, true on at least one)
     inbound_processor_enabled: bool = True

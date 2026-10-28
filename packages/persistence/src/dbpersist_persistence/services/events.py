@@ -1,7 +1,9 @@
-"""Build ObjectEvents from committed changes and hand them to the pubsub broker.
+"""Build ObjectEvents from changes and hand them to the pubsub broker.
 
 Persistence never imports pubsub code: it sends the task by name to the shared
-Redis broker (``PUBLISH_TASK_NAME``), which pubsub workers consume.
+Redis broker (``PUBLISH_TASK_NAME``), which pubsub workers consume. Write paths never call
+a publisher directly: they stage events in the outbox (``services/outbox.py``) inside their
+transaction, and the relay hands committed rows to the publisher.
 """
 
 import logging
@@ -9,7 +11,6 @@ import uuid
 from typing import Protocol
 
 from celery import Celery
-from fastapi import Request
 
 from dbpersist_common.events import EVENTS_QUEUE, PUBLISH_TASK_NAME, EventOp, ObjectEvent
 from dbpersist_common.telemetry import get_meter
@@ -57,7 +58,8 @@ class CeleryEventPublisher:
 
 
 class NullPublisher:
-    """Used when PUBSUB_ENABLED is false: events are counted and dropped, nothing is sent."""
+    """Installed when PUBSUB_ENABLED is false. No event is staged then and the relay does not
+    run, so it is never called; it exists so ``app.state.publisher`` satisfies the protocol."""
 
     def __init__(self) -> None:
         self.dropped = 0
@@ -78,10 +80,6 @@ class RecordingPublisher:
         self.events.extend(events)
         for ev in events:
             _record(ev)
-
-
-def get_publisher(request: Request) -> EventPublisher:
-    return request.app.state.publisher
 
 
 def event_for(

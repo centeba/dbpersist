@@ -25,8 +25,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from dbpersist_common.extract import MISSING, evaluate
 from dbpersist_common.inbound import InboundPull
 from dbpersist_persistence.models import InboundMessage, InboundSource
-from dbpersist_persistence.services.events import EventPublisher
 from dbpersist_persistence.services.inbound import ingest
+from dbpersist_persistence.services.outbox import stage
 from dbpersist_persistence.settings import Settings
 
 log = logging.getLogger(__name__)
@@ -64,21 +64,20 @@ def _transient(exc: BaseException) -> bool:
 
 async def process_message(
     session: AsyncSession, source: InboundSource, msg: InboundMessage, settings: Settings
-) -> list[Any]:
-    """Process one message in the current transaction; returns events to publish after commit."""
+) -> None:
+    """Process one message in the current transaction, staging its events in the outbox."""
     out, events = await ingest(session, source, msg.body)
+    await stage(session, settings, events)
     msg.status = "done"
     msg.result = out.model_dump(mode="json")
     msg.last_error = None
     msg.processed_at = datetime.now(UTC)
-    return events
 
 
 async def drain_source(
     maker: async_sessionmaker[AsyncSession],
     name: str,
     settings: Settings,
-    publisher: EventPublisher,
     limit: int = 100,
 ) -> int:
     """Process up to ``limit`` due messages of one source, in order. Returns how many were handled.
@@ -119,11 +118,10 @@ async def drain_source(
             msg.attempts += 1
             savepoint = await session.begin_nested()
             try:
-                events = await process_message(session, src, msg, settings)
+                await process_message(session, src, msg, settings)
                 await savepoint.commit()
             except Exception as exc:  # noqa: BLE001
                 await savepoint.rollback()
-                events = []
                 if _transient(exc) and msg.attempts < settings.inbound_max_attempts:
                     msg.next_attempt_at = now + backoff(
                         msg.attempts, settings.inbound_backoff_max_seconds
@@ -152,8 +150,6 @@ async def drain_source(
                         },
                     )
             await session.commit()
-            if events:
-                publisher.publish(events)
             handled += 1
             if msg.status == "pending":
                 return handled  # deferred: keep order, come back after the backoff
@@ -170,15 +166,13 @@ async def due_sources(session: AsyncSession) -> list[str]:
     return [r[0] for r in (await session.execute(stmt)).all()]
 
 
-async def drain_once(
-    maker: async_sessionmaker[AsyncSession], settings: Settings, publisher: EventPublisher
-) -> int:
+async def drain_once(maker: async_sessionmaker[AsyncSession], settings: Settings) -> int:
     """One pass over every source with due messages. Used by the loop and by tests."""
     async with maker() as session:
         names = await due_sources(session)
     total = 0
     for name in names:
-        total += await drain_source(maker, name, settings, publisher)
+        total += await drain_source(maker, name, settings)
     return total
 
 
@@ -273,7 +267,6 @@ async def pull_due(maker: async_sessionmaker[AsyncSession], client_factory: Clie
 async def run_processor(
     maker: async_sessionmaker[AsyncSession],
     settings: Settings,
-    publisher: EventPublisher,
     client_factory: ClientFactory = default_client_factory,
 ) -> None:
     """Background loop for the API process: drain due messages and run due pulls every tick."""
@@ -281,7 +274,7 @@ async def run_processor(
     while True:
         try:
             await pull_due(maker, client_factory)
-            handled = await drain_once(maker, settings, publisher)
+            handled = await drain_once(maker, settings)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001  (database down, broker down: wait and retry)

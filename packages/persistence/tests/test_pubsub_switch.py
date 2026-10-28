@@ -1,8 +1,10 @@
-"""PUBSUB_ENABLED=false: persistence runs alone, writes succeed, nothing is sent anywhere."""
+"""PUBSUB_ENABLED=false: persistence runs alone, writes succeed, nothing is staged or sent."""
 
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import func, select, text
 
 from dbpersist_persistence.main import create_app
+from dbpersist_persistence.models import OutboxEvent
 from dbpersist_persistence.services.events import NullPublisher
 from dbpersist_persistence.settings import Settings
 
@@ -20,6 +22,8 @@ async def test_persistence_without_pubsub() -> None:
     app = create_app(settings)
     assert isinstance(app.state.publisher, NullPublisher)
     async with app.router.lifespan_context(app):
+        async with app.state.engine.begin() as conn:
+            await conn.execute(text("TRUNCATE outbox"))
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test", headers=HEADERS
         ) as c:
@@ -39,7 +43,10 @@ async def test_persistence_without_pubsub() -> None:
             )
             assert r.status_code == 202
             assert (await c.get("/healthz")).status_code == 200
-    assert app.state.publisher.dropped == 4  # insert, update, transaction insert, publish-only
+        async with app.state.sessionmaker() as session:
+            # insert, update, transaction insert and publish-only all wrote no outbox row
+            n = await session.execute(select(func.count()).select_from(OutboxEvent))
+            assert n.scalar_one() == 0
 
 
 def test_default_is_enabled() -> None:

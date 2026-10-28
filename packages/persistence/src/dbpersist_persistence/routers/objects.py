@@ -10,8 +10,10 @@ from dbpersist_persistence.db import get_session
 from dbpersist_persistence.models import Object
 from dbpersist_persistence.schemas import CountIn, CountOut, ObjectOut, QueryIn, QueryOut, UpdateIn
 from dbpersist_persistence.services import objects as svc
+from dbpersist_persistence.services import outbox
 from dbpersist_persistence.services import query as qsvc
-from dbpersist_persistence.services.events import EventPublisher, event_for, get_publisher
+from dbpersist_persistence.services.events import event_for
+from dbpersist_persistence.settings import Settings
 
 router = APIRouter(prefix="/objects", tags=["objects"], dependencies=[Depends(require_api_key)])
 
@@ -37,12 +39,12 @@ async def insert_object(
     type_name: str,
     data: dict[str, Any],
     session: AsyncSession = Depends(get_session),
-    publisher: EventPublisher = Depends(get_publisher),
+    settings: Settings = Depends(outbox.get_settings),
 ) -> ObjectOut:
     otype = await svc.get_type(session, type_name)
     obj = await svc.insert(session, otype, data)
+    await outbox.stage(session, settings, [event_for(obj, "insert")])
     await session.commit()
-    publisher.publish([event_for(obj, "insert")])
     return _out(obj)
 
 
@@ -77,9 +79,9 @@ async def replace_object(
     obj_id: uuid.UUID,
     body: UpdateIn,
     session: AsyncSession = Depends(get_session),
-    publisher: EventPublisher = Depends(get_publisher),
+    settings: Settings = Depends(outbox.get_settings),
 ) -> ObjectOut:
-    return await _update(type_name, obj_id, body, "replace", session, publisher)
+    return await _update(type_name, obj_id, body, "replace", session, settings)
 
 
 @router.patch("/{type_name}/{obj_id}", response_model=ObjectOut)
@@ -88,9 +90,9 @@ async def patch_object(
     obj_id: uuid.UUID,
     body: UpdateIn,
     session: AsyncSession = Depends(get_session),
-    publisher: EventPublisher = Depends(get_publisher),
+    settings: Settings = Depends(outbox.get_settings),
 ) -> ObjectOut:
-    return await _update(type_name, obj_id, body, "merge", session, publisher)
+    return await _update(type_name, obj_id, body, "merge", session, settings)
 
 
 async def _update(
@@ -99,16 +101,16 @@ async def _update(
     body: UpdateIn,
     mode: svc.UpdateMode,
     session: AsyncSession,
-    publisher: EventPublisher,
+    settings: Settings,
 ) -> ObjectOut:
-    async def attempt() -> tuple[Object, list[str]]:
+    async def attempt() -> Object:
         otype = await svc.get_type(session, type_name)
         obj, changed = await svc.update(session, otype, obj_id, body.version, body.data, mode)
+        await outbox.stage(session, settings, [event_for(obj, "update", changed)])
         await session.commit()
-        return obj, changed
+        return obj
 
-    obj, changed = await svc.with_retry(attempt)
-    publisher.publish([event_for(obj, "update", changed)])
+    obj = await svc.with_retry(attempt)
     return _out(obj)
 
 
@@ -118,16 +120,15 @@ async def delete_object(
     obj_id: uuid.UUID,
     version: int = Query(...),
     session: AsyncSession = Depends(get_session),
-    publisher: EventPublisher = Depends(get_publisher),
+    settings: Settings = Depends(outbox.get_settings),
 ) -> None:
-    async def attempt() -> Object:
+    async def attempt() -> None:
         otype = await svc.get_type(session, type_name)
         obj = await svc.delete(session, otype, obj_id, version)
+        await outbox.stage(session, settings, [event_for(obj, "delete")])
         await session.commit()
-        return obj
 
-    obj = await svc.with_retry(attempt)
-    publisher.publish([event_for(obj, "delete")])
+    await svc.with_retry(attempt)
 
 
 @router.post("/{type_name}/query", response_model=QueryOut)

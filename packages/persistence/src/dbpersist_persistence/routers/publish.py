@@ -1,4 +1,8 @@
-"""Publish an event without persisting anything."""
+"""Publish an event without persisting an object.
+
+The event goes through the outbox like every other event, so the 202 means "durably
+accepted": a broker outage delays it instead of failing the call.
+"""
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,8 +13,9 @@ from dbpersist_common.keys import build_key
 from dbpersist_persistence.db import get_session
 from dbpersist_persistence.schemas import PublishIn, PublishOut
 from dbpersist_persistence.services import objects as svc
+from dbpersist_persistence.services import outbox
 from dbpersist_persistence.services.errors import InvalidData
-from dbpersist_persistence.services.events import EventPublisher, get_publisher
+from dbpersist_persistence.settings import Settings
 
 router = APIRouter(prefix="/publish", tags=["publish"], dependencies=[Depends(require_api_key)])
 
@@ -19,7 +24,7 @@ router = APIRouter(prefix="/publish", tags=["publish"], dependencies=[Depends(re
 async def publish_only(
     body: PublishIn,
     session: AsyncSession = Depends(get_session),
-    publisher: EventPublisher = Depends(get_publisher),
+    settings: Settings = Depends(outbox.get_settings),
 ) -> PublishOut:
     otype = await svc.get_type(session, body.type)
     if body.key is not None:
@@ -36,5 +41,6 @@ async def publish_only(
         data=body.data,
         changed_fields=body.changed_fields,
     )
-    publisher.publish([event])
+    await outbox.stage(session, settings, [event])
+    await session.commit()
     return PublishOut(event_id=event.event_id, key=key)

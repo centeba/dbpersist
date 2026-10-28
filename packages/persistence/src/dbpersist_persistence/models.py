@@ -143,3 +143,25 @@ class InboundMessage(Base):
         Index("inbound_messages_source_status_id", "source_name", "status", "id"),
         Index("inbound_messages_received", "received_at"),
     )
+
+
+class OutboxEvent(Base):
+    """A change event written in the same transaction as the change it describes.
+
+    The relay (``services/outbox.py``) hands unsent rows to the pub/sub broker in id order and
+    stamps ``sent_at``; a row exists only for a committed change, so a committed change never
+    loses its event and a rolled-back change never emits one.
+    """
+
+    __tablename__ = "outbox"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    event: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (Index("outbox_sent_id", "sent_at", "id"),)

@@ -28,6 +28,7 @@ from dbpersist_persistence.services.events import (
     NullPublisher,
 )
 from dbpersist_persistence.services.inbound_queue import run_processor
+from dbpersist_persistence.services.outbox import run_relay
 from dbpersist_persistence.settings import Settings
 
 log = logging.getLogger(__name__)
@@ -51,18 +52,23 @@ def create_app(
         log.info(
             "persistence started", extra={"database": settings.persist_database_url.split("@")[-1]}
         )
-        processor: asyncio.Task[None] | None = None
+        tasks: list[asyncio.Task[None]] = []
         if settings.inbound_processor_enabled:
-            processor = asyncio.create_task(
-                run_processor(app.state.sessionmaker, settings, app.state.publisher)
+            tasks.append(asyncio.create_task(run_processor(app.state.sessionmaker, settings)))
+        if settings.pubsub_enabled and settings.outbox_relay_enabled:
+            tasks.append(
+                asyncio.create_task(
+                    run_relay(app.state.sessionmaker, settings, app.state.publisher)
+                )
             )
         try:
             yield
         finally:
-            if processor is not None:
-                processor.cancel()
+            for task in tasks:
+                task.cancel()
+            for task in tasks:
                 try:
-                    await processor
+                    await task
                 except asyncio.CancelledError:
                     pass
             await engine.dispose()
@@ -74,7 +80,7 @@ def create_app(
     elif settings.pubsub_enabled:
         app.state.publisher = CeleryEventPublisher(make_producer(settings.redis_url))
     else:
-        log.warning("pub/sub disabled (PUBSUB_ENABLED=false): change events are not published")
+        log.warning("pub/sub disabled (PUBSUB_ENABLED=false): no change events are staged")
         app.state.publisher = NullPublisher()
 
     for r in (

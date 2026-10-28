@@ -14,7 +14,7 @@ Documentation: [Architecture](docs/ARCHITECTURE.md) · [Developer guide](docs/DE
 ## How it fits together
 
 1. A client registers an **object type** (name, key fields, optional JSON schema) and writes objects through the persistence API. Each object has a derived key, a `version`, and JSONB `data`.
-2. Every committed insert, update or delete is published as an **event** to Redis after the commit (when pub/sub is enabled, the default).
+2. Every committed insert, update or delete is recorded as an **event** in the same transaction (a transactional outbox) and relayed to Redis right after (when pub/sub is enabled, the default).
 3. The pub/sub worker matches each event against **subscriptions** (a filter tree or a list of keys) and POSTs a signed webhook to each matching **subscriber**, retrying with backoff.
 4. The SDK's receiver verifies the signature and calls your callbacks; `active_select` gives you the current rows and every change after them.
 5. Events from **outside systems** enter the same pipeline through an **inbound source**: the external publisher POSTs its own notifications to `/v1/inbound/{source}`, they are queued durably, mapped onto local types and applied as ordinary writes, so steps 2 to 4 happen for them too. Sources can also pull a publisher's feed.
@@ -138,7 +138,7 @@ Events from outside systems can be brought in as well, independently of whether 
 
 ## Running without pub/sub
 
-If you only need the persistence API, set `PUBSUB_ENABLED=false` on the persistence service and run just Postgres and persistence. Nothing else changes: writes, queries, transactions, publish-only calls and inbound sources all behave the same, change events are counted and dropped instead of being sent to Redis, and the pub/sub containers, Redis and the SDK's subscriber methods are simply not used. Turning it back on later requires no data migration; events start flowing from that point.
+If you only need the persistence API, set `PUBSUB_ENABLED=false` on the persistence service and run just Postgres and persistence. Nothing else changes: writes, queries, transactions, publish-only calls and inbound sources all behave the same, no change events are staged in the outbox and the relay does not run, and the pub/sub containers, Redis and the SDK's subscriber methods are simply not used. Turning it back on later requires no data migration; events start flowing from that point.
 
 ```bash
 PUBSUB_ENABLED=false uv run --package dbpersist-persistence uvicorn dbpersist_persistence.main:app --port 8101
@@ -190,5 +190,5 @@ The scenario catalogue is in [docs/TEST_CASES.md](docs/TEST_CASES.md).
 
 ## Notes
 
-- Events are enqueued **after** the database commit. If the enqueue itself fails the write stands and the request returns 502; replay through the pub/sub API is the recovery path.
+- Events go through a **transactional outbox**: every write stores its event row in the same transaction as the change, and a relay inside the persistence process hands committed rows to Redis in order. A Redis outage never fails a write and never loses an event; the rows wait and go out when the broker is back (`OUTBOX_*` settings).
 - One pub/sub deployment serves all subscribers; there is no server-to-server forwarding.
