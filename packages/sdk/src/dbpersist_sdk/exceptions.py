@@ -13,6 +13,10 @@ class Unauthorized(DBPersistError):
     pass
 
 
+class Forbidden(DBPersistError):
+    """The key is valid but its scopes do not cover the type or operation."""
+
+
 class NotFound(DBPersistError):
     pass
 

@@ -4,7 +4,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dbpersist_common.auth import require_api_key
+from dbpersist_common.auth import Principal, get_principal, require_type
 from dbpersist_common.keys import key_from_values
 from dbpersist_persistence.db import get_session
 from dbpersist_persistence.models import Object
@@ -15,7 +15,7 @@ from dbpersist_persistence.services import query as qsvc
 from dbpersist_persistence.services.events import event_for
 from dbpersist_persistence.settings import Settings
 
-router = APIRouter(prefix="/objects", tags=["objects"], dependencies=[Depends(require_api_key)])
+router = APIRouter(prefix="/objects", tags=["objects"], dependencies=[Depends(get_principal)])
 
 
 def _out(obj: Object, data: dict[str, Any] | None = None) -> ObjectOut:
@@ -26,10 +26,20 @@ def _out(obj: Object, data: dict[str, Any] | None = None) -> ObjectOut:
 
 
 async def _expanded(
-    session: AsyncSession, otype: Any, objs: list[Object], expand: list[str]
+    session: AsyncSession,
+    otype: Any,
+    objs: list[Object],
+    expand: list[str],
+    principal: Principal,
 ) -> list[ObjectOut]:
     if not expand:
         return [_out(o) for o in objs]
+    # expansion reads other types: the caller needs read on each referenced type too
+    props: dict[str, Any] = (otype.json_schema or {}).get("properties", {})
+    for f in expand:
+        ref = props.get(f, {}).get("x-ref")
+        if ref:
+            require_type(principal, ref, "read")
     datas = await svc.expand(session, otype, objs, expand)
     return [_out(o, d) for o, d in zip(objs, datas, strict=True)]
 
@@ -40,7 +50,9 @@ async def insert_object(
     data: dict[str, Any],
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(outbox.get_settings),
+    principal: Principal = Depends(get_principal),
 ) -> ObjectOut:
+    require_type(principal, type_name, "write")
     otype = await svc.get_type(session, type_name)
     obj = await svc.insert(session, otype, data)
     await outbox.stage(session, settings, [event_for(obj, "insert")])
@@ -54,11 +66,13 @@ async def read_by_key(
     key_path: str,
     expand: str | None = Query(default=None, description="comma-separated x-ref fields"),
     session: AsyncSession = Depends(get_session),
+    principal: Principal = Depends(get_principal),
 ) -> ObjectOut:
+    require_type(principal, type_name, "read")
     otype = await svc.get_type(session, type_name)
     key = key_from_values(key_path.split("/"))
     obj = await svc.get_by_key(session, otype, key)
-    return (await _expanded(session, otype, [obj], _split(expand)))[0]
+    return (await _expanded(session, otype, [obj], _split(expand), principal))[0]
 
 
 @router.get("/{type_name}/{obj_id}", response_model=ObjectOut)
@@ -67,10 +81,12 @@ async def read_object(
     obj_id: uuid.UUID,
     expand: str | None = Query(default=None),
     session: AsyncSession = Depends(get_session),
+    principal: Principal = Depends(get_principal),
 ) -> ObjectOut:
+    require_type(principal, type_name, "read")
     otype = await svc.get_type(session, type_name)
     obj = await svc.get_object(session, otype, obj_id)
-    return (await _expanded(session, otype, [obj], _split(expand)))[0]
+    return (await _expanded(session, otype, [obj], _split(expand), principal))[0]
 
 
 @router.put("/{type_name}/{obj_id}", response_model=ObjectOut)
@@ -80,7 +96,9 @@ async def replace_object(
     body: UpdateIn,
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(outbox.get_settings),
+    principal: Principal = Depends(get_principal),
 ) -> ObjectOut:
+    require_type(principal, type_name, "write")
     return await _update(type_name, obj_id, body, "replace", session, settings)
 
 
@@ -91,7 +109,9 @@ async def patch_object(
     body: UpdateIn,
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(outbox.get_settings),
+    principal: Principal = Depends(get_principal),
 ) -> ObjectOut:
+    require_type(principal, type_name, "write")
     return await _update(type_name, obj_id, body, "merge", session, settings)
 
 
@@ -121,7 +141,10 @@ async def delete_object(
     version: int = Query(...),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(outbox.get_settings),
+    principal: Principal = Depends(get_principal),
 ) -> None:
+    require_type(principal, type_name, "write")
+
     async def attempt() -> None:
         otype = await svc.get_type(session, type_name)
         obj = await svc.delete(session, otype, obj_id, version)
@@ -133,19 +156,28 @@ async def delete_object(
 
 @router.post("/{type_name}/query", response_model=QueryOut)
 async def query_objects(
-    type_name: str, body: QueryIn, session: AsyncSession = Depends(get_session)
+    type_name: str,
+    body: QueryIn,
+    session: AsyncSession = Depends(get_session),
+    principal: Principal = Depends(get_principal),
 ) -> QueryOut:
+    require_type(principal, type_name, "read")
     otype = await svc.get_type(session, type_name)
     rows, next_cursor = await qsvc.run_query(session, otype, body)
     return QueryOut(
-        items=await _expanded(session, otype, rows, body.expand), next_cursor=next_cursor
+        items=await _expanded(session, otype, rows, body.expand, principal),
+        next_cursor=next_cursor,
     )
 
 
 @router.post("/{type_name}/count", response_model=CountOut)
 async def count_objects(
-    type_name: str, body: CountIn, session: AsyncSession = Depends(get_session)
+    type_name: str,
+    body: CountIn,
+    session: AsyncSession = Depends(get_session),
+    principal: Principal = Depends(get_principal),
 ) -> CountOut:
+    require_type(principal, type_name, "read")
     otype = await svc.get_type(session, type_name)
     return CountOut(count=await qsvc.run_count(session, otype, body.filter))
 

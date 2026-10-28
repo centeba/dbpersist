@@ -42,7 +42,7 @@ def _schema() -> Iterator[None]:
 @pytest.fixture(autouse=True)
 def _clean_tables() -> None:
     with sync_engine().begin() as conn:
-        conn.execute(text("TRUNCATE deliveries, subscriptions, subscribers CASCADE"))
+        conn.execute(text("TRUNCATE api_keys, deliveries, subscriptions, subscribers CASCADE"))
 
 
 @pytest.fixture(autouse=True)

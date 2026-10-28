@@ -94,7 +94,7 @@ async def main() -> None:
 
 ## API summary
 
-All endpoints take `X-API-Key` (default `dev-api-key`; set `API_KEY`). Full details and semantics are in the [developer guide](docs/DEVELOPER_GUIDE.md).
+All endpoints take `X-API-Key`. Keys are **scoped**: each one names the type prefixes it may `read`, `write` or `admin`, so a service holding a key for `orders.` cannot touch `billing.` types, subscribe to them, or register types outside its prefix. `API_KEY` (default `dev-api-key`) is the bootstrap platform-admin key used to mint the first scoped keys; set it empty once they exist. Full details and semantics are in the [developer guide](docs/DEVELOPER_GUIDE.md#18-api-keys-and-scopes).
 
 **Persistence** (`/v1`)
 
@@ -112,6 +112,7 @@ All endpoints take `X-API-Key` (default `dev-api-key`; set `API_KEY`). Full deta
 | `POST /publish` | emit an event without persisting |
 | `POST /inbound/{source}` | ingress for an external publisher, authenticated by the source's own scheme; stores the message and answers 202 |
 | `POST/GET/PUT/DELETE /inbound-sources[/{name}]` | manage inbound sources (auth, mapping, pull); `POST .../test` dry-runs a payload; `GET .../messages`, `POST .../messages/retry`, `POST .../pull`, `GET .../receipts` |
+| `POST/GET /api-keys`, `POST /api-keys/{id}/disable`, `.../enable`, `DELETE /api-keys/{id}` | scoped API keys (platform admin); the secret is returned once on create |
 | `GET /health`, `GET /healthz` | liveness, readiness (database) |
 
 Version mismatches return `409 {"code": "version_conflict", "current_version": n}`.

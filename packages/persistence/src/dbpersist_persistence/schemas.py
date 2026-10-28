@@ -17,7 +17,8 @@ from dbpersist_common.inbound import (
 class ObjectTypeIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    # identifier segments joined by dots, so domains can namespace their types (orders.Order)
+    name: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
     key_fields: list[str] = Field(min_length=1)
     json_schema: dict[str, Any] = Field(default_factory=dict)
 

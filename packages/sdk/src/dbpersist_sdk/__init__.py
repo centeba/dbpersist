@@ -1,15 +1,18 @@
+from dbpersist_common.auth import Scope
 from dbpersist_common.inbound import InboundAuth, InboundMapping
 from dbpersist_sdk.client import DBPersistClient, Transaction
 from dbpersist_sdk.exceptions import (
     DBPersistError,
     DeliveryError,
     DuplicateKey,
+    Forbidden,
     InvalidData,
     NotFound,
     Unauthorized,
     VersionConflict,
 )
 from dbpersist_sdk.models import (
+    ApiKeyInfo,
     BaseCallbacks,
     Callbacks,
     ObjectRecord,
@@ -22,18 +25,21 @@ from dbpersist_sdk.models import (
 from dbpersist_sdk.receiver import make_receiver
 
 __all__ = [
+    "ApiKeyInfo",
     "BaseCallbacks",
     "Callbacks",
     "DBPersistClient",
     "DBPersistError",
     "DeliveryError",
     "DuplicateKey",
+    "Forbidden",
     "InboundAuth",
     "InboundMapping",
     "InvalidData",
     "NotFound",
     "ObjectRecord",
     "ObjectTypeInfo",
+    "Scope",
     "SubscriberInfo",
     "SubscriptionHandle",
     "Transaction",

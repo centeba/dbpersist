@@ -63,8 +63,8 @@ async def app(settings: Settings, publisher: RecordingPublisher) -> AsyncIterato
         async with app.state.engine.begin() as conn:
             await conn.execute(
                 text(
-                    "TRUNCATE outbox, inbound_receipts, inbound_messages, inbound_sources, "
-                    "objects, object_types CASCADE"
+                    "TRUNCATE api_keys, outbox, inbound_receipts, inbound_messages, "
+                    "inbound_sources, objects, object_types CASCADE"
                 )
             )
         yield app

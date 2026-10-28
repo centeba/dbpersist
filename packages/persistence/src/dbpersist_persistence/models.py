@@ -6,7 +6,12 @@ from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from dbpersist_common.apikeys import ApiKeyMixin
 from dbpersist_persistence.db import Base
+
+
+class ApiKey(ApiKeyMixin, Base):
+    pass
 
 
 class ObjectType(Base):

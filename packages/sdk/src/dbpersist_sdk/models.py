@@ -48,6 +48,17 @@ class SubscriberInfo(BaseModel):
     secret: str
 
 
+class ApiKeyInfo(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: uuid.UUID
+    name: str
+    key_hint: str
+    scopes: list[dict[str, Any]]
+    enabled: bool
+    key: str | None = None  # only on the create response
+
+
 class SubscriptionHandle(BaseModel):
     id: uuid.UUID
     type_name: str

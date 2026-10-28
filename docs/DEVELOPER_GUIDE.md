@@ -21,6 +21,7 @@ Contents
 15. [Performance](#15-performance)
 16. [Inbound sources](#16-inbound-sources)
 17. [Running persistence without pub/sub](#17-running-persistence-without-pubsub)
+18. [API keys and scopes](#18-api-keys-and-scopes)
 
 ## 1. Architecture
 
@@ -203,7 +204,8 @@ All settings are environment variables (or `.env`), read by pydantic-settings; n
 
 | Variable | Default | Used by | Meaning |
 |---|---|---|---|
-| `API_KEY` | `dev-api-key` | both APIs, SDK | value of the `X-API-Key` header |
+| `API_KEY` | `dev-api-key` | both APIs | bootstrap platform-admin key; empty disables it once scoped keys exist (§18) |
+| `API_KEY_CACHE_SECONDS` | `30` | both APIs | how long a resolved key is cached per process; the upper bound on how long a disabled key keeps working elsewhere |
 | `PUBSUB_ENABLED` | `true` | persistence | publish change events to pub/sub; `false` runs persistence alone with no Redis and no events |
 | `REDIS_URL` | `redis://localhost:6389/0` | both | Celery broker and pubsub stats (unused by persistence when `PUBSUB_ENABLED=false`) |
 | `PERSIST_DATABASE_URL` | `postgresql+asyncpg://…:5442/persist` | persistence | async DSN |
@@ -473,3 +475,67 @@ The base file also forwards `PUBSUB_ENABLED` from your `.env`, so setting it the
 effect on the full stack. The SDK works the same, you simply never call `register_subscriber`,
 `subscribe` or `active_select`. `packages/persistence/tests/test_pubsub_switch.py` is the test
 for this mode.
+
+## 18. API keys and scopes
+
+Every call to either API carries `X-API-Key`. A key resolves to a **principal**: a name and a
+list of **scopes**, each a type-name prefix with permissions. Permissions nest, `admin` implies
+`write` implies `read`. The prefix `*` covers every type, and a key holding `admin` on `*` is a
+**platform admin**.
+
+```json
+{"name": "orders-service",
+ "scopes": [{"type_prefix": "orders.", "permissions": ["read", "write"]},
+            {"type_prefix": "customers.", "permissions": ["read"]}]}
+```
+
+Type names may contain dots so that domains can namespace them (`orders.Order`,
+`billing.Invoice`); the prefix match is a plain string prefix, so `orders.` covers exactly that
+domain and `orders` would also cover `ordersarchive.X`. Use the trailing dot.
+
+What each permission unlocks:
+
+| Operation | Needs |
+|---|---|
+| read, query, count an object type; `GET /types/{name}`; `expand=` | `read` on the type, and on every `x-ref` type expanded |
+| insert, update, delete, `POST /publish`, each op of a transaction | `write` on the type (a transaction is checked in full before any op runs) |
+| `POST /types` | `admin` on the new type's name, so a domain admin registers its own types |
+| `GET /types` | lists only the types the key can read |
+| pub/sub: create a subscription | `read` on the subscribed type, and ownership of the subscriber |
+| pub/sub: read, heartbeat, replay, delete a subscriber or its subscriptions | the key that created the subscriber (its `owner`), or a platform admin |
+| pub/sub `POST /publish` | `write` on the event's type |
+| `/inbound-sources`, `/admin`, `/api-keys` | platform admin |
+| `POST /inbound/{source}` | the source's own scheme, not an API key |
+
+### Managing keys
+
+Each service stores keys in its own `api_keys` table (hashed with SHA-256, a 4-character hint
+kept for display). `POST /v1/api-keys` on a service creates a key there and returns the secret
+once; passing `"key": "<secret>"` registers an existing secret, which is how one key comes to
+work on both services. The SDK does this for you:
+
+```python
+info = await admin.create_api_key(
+    "orders-service",
+    [{"type_prefix": "orders.", "permissions": ["read", "write"]}],
+)
+print(info.key)                     # shown once; give it to the orders service
+await admin.disable_api_key("orders-service")   # reversible, both services
+await admin.delete_api_key("orders-service")
+```
+
+Disabling or deleting takes effect immediately in the process that handled the call and within
+`API_KEY_CACHE_SECONDS` in every other process. Every change event's log line carries the
+`principal` that made the change, so the structured logs are an audit trail per key.
+
+### The bootstrap key
+
+`API_KEY` is a platform admin that exists only in configuration, so a fresh deployment (and the
+compose stack and the example app) works before any key is stored. Use it to mint the first
+scoped keys, then set `API_KEY=""` on both services to retire it. Subscribers created before keys
+were scoped have no `owner` and remain usable by any key; set their owner in the database or
+re-register them under the owning key.
+
+Swapping the whole scheme for gateway-issued JWTs means replacing `get_principal` in
+`dbpersist_common/auth.py` with one that builds the same `Principal` from the token's claims;
+nothing else changes.

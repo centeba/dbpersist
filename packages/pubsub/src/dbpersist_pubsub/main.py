@@ -8,13 +8,15 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+from dbpersist_common import apikeys
 from dbpersist_common.telemetry import (
     init_telemetry,
     instrument_celery,
     instrument_fastapi,
     instrument_sqlalchemy,
 )
-from dbpersist_pubsub.db import make_async_engine, make_async_sessionmaker
+from dbpersist_pubsub.db import get_session, make_async_engine, make_async_sessionmaker
+from dbpersist_pubsub.models import ApiKey
 from dbpersist_pubsub.routers import admin, publish, subscribers, subscriptions
 from dbpersist_pubsub.settings import Settings
 
@@ -32,12 +34,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         instrument_sqlalchemy(engine)
         app.state.engine = engine
         app.state.sessionmaker = make_async_sessionmaker(engine)
+        apikeys.install_key_store(
+            app.state, app.state.sessionmaker, ApiKey, settings.api_key_cache_seconds
+        )
         yield
         await engine.dispose()
 
     app = FastAPI(title="dbpersist pubsub", version="0.1.0", lifespan=lifespan)
     app.state.settings = settings
-    for r in (subscribers.router, subscriptions.router, publish.router, admin.router):
+    for r in (
+        subscribers.router,
+        subscriptions.router,
+        publish.router,
+        admin.router,
+        apikeys.make_router(ApiKey, get_session),
+    ):
         app.include_router(r, prefix="/v1")
     instrument_fastapi(app)
 

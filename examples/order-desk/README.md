@@ -121,7 +121,7 @@ cli.py / UI actions ──writes──▶ persistence API ──event──▶ p
 | Variable | Default | Meaning |
 |---|---|---|
 | `PERSIST_URL` / `PUBSUB_URL` | `http://localhost:8101` / `8102` | dbpersist endpoints |
-| `API_KEY` | `dev-api-key` | shared API key |
+| `API_KEY` | `dev-api-key` | API key; the default is the platform's bootstrap admin. For a scoped key, mint one with `read`/`write` on `Order` and `Customer` (the desk's types) and set it here |
 | `DASHBOARD_PORT` | `9200` | dashboard listen port |
 | `DASHBOARD_BIND` | `0.0.0.0` | bind address |
 | `DASHBOARD_PUBLIC_HOST` | `host.docker.internal` | hostname the pub/sub worker uses to call back |

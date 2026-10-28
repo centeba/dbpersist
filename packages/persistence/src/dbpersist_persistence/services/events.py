@@ -12,6 +12,7 @@ from typing import Protocol
 
 from celery import Celery
 
+from dbpersist_common.auth import current_principal
 from dbpersist_common.events import EVENTS_QUEUE, PUBLISH_TASK_NAME, EventOp, ObjectEvent
 from dbpersist_common.telemetry import get_meter
 from dbpersist_persistence.models import Object
@@ -39,6 +40,7 @@ def _record(ev: ObjectEvent) -> None:
             "object_version": ev.version,
             "changed_fields": ",".join(ev.changed_fields),
             "transaction_id": str(ev.transaction_id) if ev.transaction_id else None,
+            "principal": current_principal.get(),
         },
     )
 

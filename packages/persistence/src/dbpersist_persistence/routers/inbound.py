@@ -4,7 +4,7 @@
 source's own scheme, not by the dbpersist API key. By default it only stores the message
 (202 Accepted); the background processor applies it. A source with ``processing: sync``
 applies the message before answering (200 with the per-event outcome). Everything under
-``/v1/inbound-sources`` is operator-facing and takes the API key.
+``/v1/inbound-sources`` is operator-facing and needs a platform-admin API key.
 """
 
 import json
@@ -17,7 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dbpersist_common.auth import require_api_key
+from dbpersist_common.auth import admin_only
 from dbpersist_common.inbound import (
     InboundAuth,
     InboundMapping,
@@ -49,9 +49,7 @@ from dbpersist_persistence.settings import Settings
 log = logging.getLogger(__name__)
 
 ingress = APIRouter(prefix="/inbound", tags=["inbound"])
-manage = APIRouter(
-    prefix="/inbound-sources", tags=["inbound"], dependencies=[Depends(require_api_key)]
-)
+manage = APIRouter(prefix="/inbound-sources", tags=["inbound"], dependencies=[Depends(admin_only)])
 
 
 def _mask(auth: dict[str, Any]) -> dict[str, Any]:

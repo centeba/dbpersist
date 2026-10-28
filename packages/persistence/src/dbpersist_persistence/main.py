@@ -7,6 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+from dbpersist_common import apikeys
 from dbpersist_common.telemetry import (
     init_telemetry,
     instrument_celery,
@@ -14,7 +15,8 @@ from dbpersist_common.telemetry import (
     instrument_sqlalchemy,
 )
 from dbpersist_persistence.celery_app import make_producer
-from dbpersist_persistence.db import make_engine, make_sessionmaker
+from dbpersist_persistence.db import get_session, make_engine, make_sessionmaker
+from dbpersist_persistence.models import ApiKey
 from dbpersist_persistence.routers import inbound, objects, publish, transactions, types
 from dbpersist_persistence.services.errors import (
     DuplicateKey,
@@ -49,6 +51,9 @@ def create_app(
         instrument_sqlalchemy(engine)
         app.state.engine = engine
         app.state.sessionmaker = make_sessionmaker(engine)
+        apikeys.install_key_store(
+            app.state, app.state.sessionmaker, ApiKey, settings.api_key_cache_seconds
+        )
         log.info(
             "persistence started", extra={"database": settings.persist_database_url.split("@")[-1]}
         )
@@ -90,6 +95,7 @@ def create_app(
         publish.router,
         inbound.ingress,
         inbound.manage,
+        apikeys.make_router(ApiKey, get_session),
     ):
         app.include_router(r, prefix="/v1")
     instrument_fastapi(app)

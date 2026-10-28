@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dbpersist_common.auth import require_api_key
+from dbpersist_common.auth import admin_only
 from dbpersist_pubsub.db import get_session
 from dbpersist_pubsub.models import Delivery, Subscriber, Subscription
 from dbpersist_pubsub.routers.subscribers import get_subscriber
@@ -21,7 +21,7 @@ from dbpersist_pubsub.schemas import (
 from dbpersist_pubsub.stats import COUNTERS, get_stats
 from dbpersist_pubsub.tasks.cleanup import remove_idle_subscribers
 
-router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_api_key)])
+router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(admin_only)])
 
 
 @router.get("/clients", response_model=list[ClientInfo])

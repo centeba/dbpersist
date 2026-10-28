@@ -12,17 +12,20 @@ from typing import Any, Literal
 import httpx
 from pydantic import ValidationError
 
+from dbpersist_common.auth import Scope
 from dbpersist_common.filters import dump_filter, parse_filter
 from dbpersist_common.inbound import InboundAuth, InboundMapping, InboundPull
 from dbpersist_sdk.exceptions import (
     DBPersistError,
     DuplicateKey,
+    Forbidden,
     InvalidData,
     NotFound,
     Unauthorized,
     VersionConflict,
 )
 from dbpersist_sdk.models import (
+    ApiKeyInfo,
     Callbacks,
     ObjectRecord,
     ObjectTypeInfo,
@@ -32,6 +35,7 @@ from dbpersist_sdk.models import (
 )
 
 UpdateMode = Literal["replace", "merge"]
+Service = Literal["persistence", "pubsub"]
 FilterLike = dict[str, Any] | None
 
 _ERRORS: dict[str, type[DBPersistError]] = {
@@ -55,6 +59,8 @@ def _raise_for(resp: httpx.Response) -> None:
     detail = payload.get("detail", resp.reason_phrase)
     if resp.status_code == 401:
         raise Unauthorized(str(detail), resp.status_code, payload)
+    if resp.status_code == 403:
+        raise Forbidden(str(detail), resp.status_code, payload)
     if resp.status_code == 404 and code is None:
         raise NotFound(str(detail), resp.status_code, payload)
     if resp.status_code == 422 and code is None:
@@ -483,3 +489,71 @@ class DBPersistClient:
 
     def inbound_url(self, name: str) -> str:
         return f"{self._p.base_url}/inbound/{name}"
+
+    # ---- API keys (platform admin only) ---------------------------------------------------
+
+    def _service(self, service: Service) -> httpx.AsyncClient:
+        return self._p if service == "persistence" else self._s
+
+    async def create_api_key(
+        self,
+        name: str,
+        scopes: list[Scope | dict[str, Any]],
+        *,
+        services: tuple[Service, ...] = ("persistence", "pubsub"),
+    ) -> ApiKeyInfo:
+        """Create a scoped key and register the same secret in every listed service.
+
+        The secret is in the returned ``key`` and is never shown again. Each service keeps its
+        own key table, so the first service generates the secret and the others store it.
+        """
+        body: dict[str, Any] = {
+            "name": name,
+            "scopes": [
+                (s if isinstance(s, Scope) else Scope.model_validate(s)).model_dump()
+                for s in scopes
+            ],
+        }
+        created: ApiKeyInfo | None = None
+        for service in services:
+            if created is not None:
+                body["key"] = created.key
+            r = await self._service(service).post("/api-keys", json=body)
+            _raise_for(r)
+            if created is None:
+                created = ApiKeyInfo.model_validate(r.json())
+        assert created is not None, "services must not be empty"
+        return created
+
+    async def list_api_keys(self, service: Service = "persistence") -> list[ApiKeyInfo]:
+        r = await self._service(service).get("/api-keys")
+        _raise_for(r)
+        return [ApiKeyInfo.model_validate(k) for k in r.json()]
+
+    async def _key_action(self, name: str, action: str, services: tuple[Service, ...]) -> None:
+        for service in services:
+            for k in await self.list_api_keys(service):
+                if k.name == name:
+                    c = self._service(service)
+                    r = (
+                        await c.delete(f"/api-keys/{k.id}")
+                        if action == "delete"
+                        else await c.post(f"/api-keys/{k.id}/{action}")
+                    )
+                    _raise_for(r)
+
+    async def disable_api_key(
+        self, name: str, *, services: tuple[Service, ...] = ("persistence", "pubsub")
+    ) -> None:
+        """Stop a key working everywhere it is registered (reversible with ``enable_api_key``)."""
+        await self._key_action(name, "disable", services)
+
+    async def enable_api_key(
+        self, name: str, *, services: tuple[Service, ...] = ("persistence", "pubsub")
+    ) -> None:
+        await self._key_action(name, "enable", services)
+
+    async def delete_api_key(
+        self, name: str, *, services: tuple[Service, ...] = ("persistence", "pubsub")
+    ) -> None:
+        await self._key_action(name, "delete", services)

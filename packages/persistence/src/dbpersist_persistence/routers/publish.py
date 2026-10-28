@@ -7,7 +7,7 @@ accepted": a broker outage delays it instead of failing the call.
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dbpersist_common.auth import require_api_key
+from dbpersist_common.auth import Principal, get_principal, require_type
 from dbpersist_common.events import ObjectEvent
 from dbpersist_common.keys import build_key
 from dbpersist_persistence.db import get_session
@@ -17,7 +17,7 @@ from dbpersist_persistence.services import outbox
 from dbpersist_persistence.services.errors import InvalidData
 from dbpersist_persistence.settings import Settings
 
-router = APIRouter(prefix="/publish", tags=["publish"], dependencies=[Depends(require_api_key)])
+router = APIRouter(prefix="/publish", tags=["publish"], dependencies=[Depends(get_principal)])
 
 
 @router.post("", response_model=PublishOut, status_code=202)
@@ -25,7 +25,9 @@ async def publish_only(
     body: PublishIn,
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(outbox.get_settings),
+    principal: Principal = Depends(get_principal),
 ) -> PublishOut:
+    require_type(principal, body.type, "write")
     otype = await svc.get_type(session, body.type)
     if body.key is not None:
         key = body.key

@@ -6,7 +6,12 @@ from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Index,
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from dbpersist_common.apikeys import ApiKeyMixin
 from dbpersist_pubsub.db import Base
+
+
+class ApiKey(ApiKeyMixin, Base):
+    pass
 
 
 class Subscriber(Base):
@@ -18,6 +23,8 @@ class Subscriber(Base):
     name: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     webhook_url: Mapped[str] = mapped_column(Text, nullable=False)
     secret: Mapped[str] = mapped_column(Text, nullable=False)
+    # name of the API key that registered it; None for rows created before keys were scoped
+    owner: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

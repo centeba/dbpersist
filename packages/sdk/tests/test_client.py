@@ -170,3 +170,49 @@ async def test_register_subscribe_active_select_order(client: DBPersistClient) -
     assert sub_id not in client.callbacks
     respx.post(f"{S}/subscribers/{sid}/heartbeat").mock(return_value=httpx.Response(200, json={}))
     await client.heartbeat()
+
+
+@respx.mock
+async def test_create_api_key_registers_the_same_secret_in_both_services(
+    client: DBPersistClient,
+) -> None:
+    created = {
+        "id": str(uuid.uuid4()),
+        "name": "orders-svc",
+        "key_hint": "abcd",
+        "scopes": [{"type_prefix": "orders.", "permissions": ["read", "write"]}],
+        "enabled": True,
+        "created_at": "2026-01-01T00:00:00Z",
+        "key": "dbp_secret_abcd",
+    }
+    p = respx.post(f"{P}/api-keys").mock(return_value=httpx.Response(201, json=created))
+    s = respx.post(f"{S}/api-keys").mock(
+        return_value=httpx.Response(201, json={**created, "id": str(uuid.uuid4())})
+    )
+    info = await client.create_api_key(
+        "orders-svc", [{"type_prefix": "orders.", "permissions": ["read", "write"]}]
+    )
+    assert info.key == "dbp_secret_abcd"
+    assert "key" not in json.loads(p.calls[0].request.content)
+    assert json.loads(s.calls[0].request.content)["key"] == "dbp_secret_abcd"
+
+
+@respx.mock
+async def test_disable_api_key_by_name_and_forbidden_maps(client: DBPersistClient) -> None:
+    from dbpersist_sdk import Forbidden
+
+    kid = str(uuid.uuid4())
+    row = {"id": kid, "name": "orders-svc", "key_hint": "abcd", "scopes": [], "enabled": True}
+    respx.get(f"{P}/api-keys").mock(return_value=httpx.Response(200, json=[row]))
+    respx.get(f"{S}/api-keys").mock(return_value=httpx.Response(200, json=[]))
+    d = respx.post(f"{P}/api-keys/{kid}/disable").mock(
+        return_value=httpx.Response(200, json={**row, "enabled": False})
+    )
+    await client.disable_api_key("orders-svc")
+    assert d.called
+
+    respx.post(f"{P}/objects/billing.Invoice").mock(
+        return_value=httpx.Response(403, json={"detail": "key lacks write on billing.Invoice"})
+    )
+    with pytest.raises(Forbidden):
+        await client.insert("billing.Invoice", {"k": "a"})

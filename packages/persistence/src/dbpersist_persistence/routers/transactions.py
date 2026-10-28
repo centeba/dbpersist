@@ -5,7 +5,7 @@ import uuid
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dbpersist_common.auth import require_api_key
+from dbpersist_common.auth import Principal, get_principal, require_type
 from dbpersist_common.events import ObjectEvent
 from dbpersist_persistence.db import get_session
 from dbpersist_persistence.schemas import (
@@ -23,7 +23,7 @@ from dbpersist_persistence.services.events import event_for
 from dbpersist_persistence.settings import Settings
 
 router = APIRouter(
-    prefix="/transactions", tags=["transactions"], dependencies=[Depends(require_api_key)]
+    prefix="/transactions", tags=["transactions"], dependencies=[Depends(get_principal)]
 )
 
 
@@ -32,7 +32,11 @@ async def commit_transaction(
     body: TransactionIn,
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(outbox.get_settings),
+    principal: Principal = Depends(get_principal),
 ) -> TransactionOut:
+    # authorize the whole batch before touching anything: one out-of-scope op rejects it all
+    for op in body.ops:
+        require_type(principal, op.type, "write")
     tx_id = uuid.uuid4()
 
     async def attempt() -> list[OpResult]:
